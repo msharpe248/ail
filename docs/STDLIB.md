@@ -205,7 +205,8 @@ Exact arbitrary-precision base-10 decimal backed by MLWSVM `.dec`.
 
 ```properties
 # Generative LLM (driver: "openai" | "ollama" | "anthropic" | "mock")
-llm.fast = {"driver": "openai", "url": "http://127.0.0.1:11434/v1", "model": "gemma4:31b-mlx", "timeout_ms": 120000}
+# Optional fields for thinking models (e.g. Ollama gemma4/qwen3): "think": false, "reasoning_effort": "none"|"low"|"medium"|"high"
+llm.fast = {"driver": "openai", "url": "http://127.0.0.1:11434/v1", "model": "gemma4:31b-mlx", "think": false, "reasoning_effort": "none", "timeout_ms": 120000}
 secret llm.claude = {"driver": "anthropic", "model": "claude-sonnet-4-20250514", "api_key": "${ANTHROPIC_API_KEY}"}
 llm.test = {"driver": "mock", "reply": "hello"}
 

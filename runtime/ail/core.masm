@@ -2617,6 +2617,7 @@ bpr_l:
     inc I2
     jmp bpr_l
 bpr_d:
+    ncall "io.flush"
     ret null
 
 b_ro:

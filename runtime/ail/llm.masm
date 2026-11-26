@@ -120,6 +120,41 @@ mock_single:
     ret R4
 .endf
 
+; ---- Helper: apply optional OpenAI/Ollama config fields (reasoning_effort, think, temperature) ----
+.func apply_openai_opts(ref body, ref mcfg, ref opts) -> ref
+    mov R3, body
+    bz.r mcfg, chk_opts
+    mhas I0, mcfg, "reasoning_effort"
+    bz I0, chk_think
+    mget.r R4, mcfg, "reasoning_effort", null
+    bz.r R4, chk_think
+    mset R3, "reasoning_effort", R4
+chk_think:
+    mhas I0, mcfg, "think"
+    bz I0, chk_opts
+.try think_err
+    mget I1, mcfg, "think", 1
+.endtry
+    bnz I1, think_true
+    ncall "json.parse" ("{\"think\":false}") -> (R5)
+    jmp think_merge
+think_true:
+    ncall "json.parse" ("{\"think\":true}") -> (R5)
+think_merge:
+    ncall "map.union" (R3, R5) -> (R3)
+    jmp chk_opts
+think_err:
+    catch R9
+chk_opts:
+    bz.r opts, done_opts
+    mhas I2, opts, "temperature"
+    bz I2, done_opts
+    mget F0, opts, "temperature", 0.0
+    mset R3, "temperature", F0
+done_opts:
+    ret R3
+.endf
+
 ; ---- OpenAI-compatible HTTP/TLS driver (OpenAI, Ollama /v1, vLLM, llama.cpp) ----
 
 .func chat_openai(ref mcfg, ref msgs, ref tools_spec, ref opts) -> ref
@@ -146,11 +181,7 @@ mock_single:
     len I3, tools_spec
     bz I3, 3f
     mset R8, "tools", tools_spec
-3:  bz.r opts, 4f
-    mhas I4, opts, "temperature"
-    bz I4, 4f
-    mget F0, opts, "temperature", 0.0
-    mset R8, "temperature", F0
+3:  call apply_openai_opts (R8, mcfg, opts) -> (R8)
 4:  ncall "json.stringify" (R8, 0) -> (R9)
 
     ; Request headers
@@ -363,7 +394,8 @@ have_slot:
     len I3, tools_spec
     bz I3, 3f
     mset R9, "tools", tools_spec
-3:  ncall "json.stringify" (R9, 0) -> (R10)
+3:  call apply_openai_opts (R9, mcfg, opts) -> (R9)
+    ncall "json.stringify" (R9, 0) -> (R10)
 
     mnew R11
     mset R11, "Content-Type", "application/json"

@@ -270,6 +270,28 @@ j_err:
     mnew R12
     mset R12, "model", R5
     mset R12, "messages", R9
+    mhas I3, scfg, "reasoning_effort"
+    bz I3, s1_chk_think
+    mget.r R13, scfg, "reasoning_effort", null
+    bz.r R13, s1_chk_think
+    mset R12, "reasoning_effort", R13
+s1_chk_think:
+    mhas I3, scfg, "think"
+    bz I3, s1_mk_json
+.try s1_think_err
+    mget I4, scfg, "think", 1
+.endtry
+    bnz I4, s1_think_t
+    ncall "json.parse" ("{\"think\":false}") -> (R13)
+    jmp s1_think_m
+s1_think_t:
+    ncall "json.parse" ("{\"think\":true}") -> (R13)
+s1_think_m:
+    ncall "map.union" (R12, R13) -> (R12)
+    jmp s1_mk_json
+s1_think_err:
+    catch R13
+s1_mk_json:
     ncall "json.stringify" (R12, 0) -> (R13)
 
     mnew R14
