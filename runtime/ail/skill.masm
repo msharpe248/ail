@@ -1,0 +1,284 @@
+; ail.skill - Agent Skills loader (standard SKILL.md directories + inline AIL skills)
+; Implements progressive disclosure: frontmatter catalog -> on-demand load_skill tool.
+
+.module ail.skill
+.import ail.core as core
+.import ail.config as cfg
+.import ail.sandbox as sandbox
+.export mk_inline_skill, load_skills, build_catalog_prompt, make_load_skill_tool, AilSkill
+
+.struct AilSkill
+    name: ref
+    description: ref
+    instructions: ref  ; null for lazy SKILL.md until activated
+    path: ref          ; path to SKILL.md (or null for inline)
+    dir: ref           ; skill directory (for references/scripts)
+    tools: ref         ; optional list of AilTool
+    caps: ref          ; optional cap.restrict grants map
+.ends
+
+; mk_inline_skill(name, doc, instructions, tools_list, caps_map) -> AilSkill
+.func mk_inline_skill(ref name, ref doc, ref instructions, ref tools_l, ref caps_m) -> ref
+    new R5, AilSkill
+    mov R5->AilSkill.name, name
+    mov R5->AilSkill.description, doc
+    mov R5->AilSkill.instructions, instructions
+    mov R5->AilSkill.path, null
+    mov R5->AilSkill.dir, null
+    mov R5->AilSkill.tools, tools_l
+    mov R5->AilSkill.caps, caps_m
+    ret R5
+.endf
+
+; Parse YAML frontmatter (--- ... ---) from SKILL.md text -> (name, description, body)
+.func parse_skill_md(ref text, ref fallback_name) -> (ref, ref, ref)
+    mov R2, fallback_name
+    mov R3, ""
+    mov R4, text
+    ncall "text.starts_with" (text, "---") -> (I0)
+    bz I0, done
+    ncall "text.find" (text, "\n", 0) -> (I1)
+    blt I1, 0, done
+    add I2, I1, 1                     ; start of frontmatter lines
+    ncall "text.find" (text, "\n---", I2) -> (I3)
+    blt I3, 0, done
+    sub I4, I3, I2
+    substr R5, text, I2, I4           ; frontmatter block
+    ; Body starts after closing "---\n"
+    add I5, I3, 4
+    len I6, text
+    bge I5, I6, parse_fm
+    mov I7, text[I5]
+    bne I7, '\r', 1f
+    inc I5
+1:  bge I5, I6, parse_fm
+    mov I7, text[I5]
+    bne I7, '\n', 2f
+    inc I5
+2:  sub I8, I6, I5
+    substr R4, text, I5, I8
+    ncall "text.trim_start" (R4) -> (R4)
+
+parse_fm:
+    ncall "text.lines" (R5) -> (R6)
+    len I9, R6
+    mov I10, 0
+fm_loop:
+    bge I10, I9, done
+    mov R7, R6[I10]
+    inc I10
+    ncall "text.find" (R7, ":", 0) -> (I11)
+    blt I11, 0, fm_loop
+    substr R8, R7, 0, I11
+    ncall "text.trim" (R8) -> (R8)
+    len I12, R7
+    add I13, I11, 1
+    sub I14, I12, I13
+    substr R9, R7, I13, I14
+    ncall "text.trim" (R9) -> (R9)
+    ; Strip optional surrounding quotes
+    len I15, R9
+    blt I15, 2, chk_key
+    mov I16, R9[0]
+    beq I16, '"', strip_q
+    beq I16, '\'', strip_q
+    jmp chk_key
+strip_q:
+    sub I15, I15, 2
+    substr R9, R9, 1, I15
+chk_key:
+    strcmp I17, R8, "name"
+    bnz I17, chk_desc
+    mov R2, R9
+    jmp fm_loop
+chk_desc:
+    strcmp I17, R8, "description"
+    bnz I17, fm_loop
+    mov R3, R9
+    jmp fm_loop
+done:
+    ret R2, R3, R4
+.endf
+
+; Scan one directory path for <dir>/<subdir>/SKILL.md (or <dir>/SKILL.md)
+.func scan_dir(ref dir_path, ref out_map)
+.try err
+    ncall "fs.exists" (dir_path) -> (I0)
+    bz I0, err
+    ; Direct SKILL.md inside dir_path?
+    ncall "path.join" (dir_path, "SKILL.md") -> (R2)
+    ncall "fs.exists" (R2) -> (I1)
+    bz I1, scan_children
+    ncall "fs.read_file" (R2) -> (R3)
+    strcat R4, R3
+    ncall "path.basename" (dir_path) -> (R5)
+    call parse_skill_md (R4, R5) -> (R6, R7, R8)
+    new R9, AilSkill
+    mov R9->AilSkill.name, R6
+    mov R9->AilSkill.description, R7
+    mov R9->AilSkill.instructions, null   ; lazy progressive disclosure!
+    mov R9->AilSkill.path, R2
+    mov R9->AilSkill.dir, dir_path
+    mset out_map, R6, R9
+    ret
+
+scan_children:
+    ncall "fs.list" (dir_path) -> (R2)
+    len I2, R2
+    mov I3, 0
+sc_loop:
+    bge I3, I2, done
+    mov R3, R2[I3]
+    inc I3
+    ncall "path.join" (dir_path, R3) -> (R4)
+    ncall "path.join" (R4, "SKILL.md") -> (R5)
+    ncall "fs.exists" (R5) -> (I4)
+    bz I4, sc_loop
+    ncall "fs.read_file" (R5) -> (R6)
+    strcat R7, R6
+    call parse_skill_md (R7, R3) -> (R8, R9, R10)
+    new R11, AilSkill
+    mov R11->AilSkill.name, R8
+    mov R11->AilSkill.description, R9
+    mov R11->AilSkill.instructions, null
+    mov R11->AilSkill.path, R5
+    mov R11->AilSkill.dir, R4
+    mset out_map, R8, R11
+    jmp sc_loop
+.endtry
+err:
+    catch R12
+done:
+    ret
+.endf
+
+; load_skills(spec_or_list) -> map[skill_name -> AilSkill]
+; Each element can be: AilSkill (inline), Symbol (config binding `skills.<name>`), or String (dir path)
+.func load_skills(ref specs) -> ref
+    mnew R1
+    bz.r specs, done
+    typeof I0, specs
+    beq I0, 5, is_list
+    lnew R2
+    lpush R2, specs
+    jmp iterate
+is_list:
+    mov R2, specs
+iterate:
+    len I1, R2
+    mov I2, 0
+ls_loop:
+    bge I2, I1, done
+    mov R3, R2[I2]
+    inc I2
+    bz.r R3, ls_loop
+    bisa R3, AilSkill, add_inline
+    bisa R3, core.AilSym, load_cfg
+    typeof I3, R3
+    beq I3, 1, load_dir
+    jmp ls_loop
+add_inline:
+    mset R1, R3->AilSkill.name, R3
+    jmp ls_loop
+load_dir:
+    call scan_dir (R3, R1)
+    jmp ls_loop
+load_cfg:
+    mov R4, R3->core.AilSym.name
+    call cfg.get_binding_raw ("skills", R4) -> (R5)
+    bz.r R5, ls_loop
+    mget.r R6, R5, "paths", null
+    bz.r R6, ls_loop
+    len I4, R6
+    mov I5, 0
+lc_loop:
+    bge I5, I4, ls_loop
+    mov R7, R6[I5]
+    inc I5
+    call scan_dir (R7, R1)
+    jmp lc_loop
+done:
+    ret R1
+.endf
+
+; build_catalog_prompt(skills_map) -> string (metadata-only progressive disclosure)
+.func build_catalog_prompt(ref skills_map) -> ref
+    bz.r skills_map, empty
+    mkeys R1, skills_map
+    len I0, R1
+    bz I0, empty
+    bufnew R2, 0
+    bufcat R2, "Available skills (call `load_skill` with the skill name when a task matches):\n"
+    mov I1, 0
+1:  bge I1, I0, 2f
+    mov R3, R1[I1]
+    inc I1
+    mget.r R4, skills_map, R3, null
+    bufcat R2, "- "
+    bufcat R2, R4->AilSkill.name
+    bufcat R2, ": "
+    mov R5, R4->AilSkill.description
+    bnz.r R5, 3f
+    mov R5, "(no description)"
+3:  bufcat R2, R5
+    bufcat R2, "\n"
+    jmp 1b
+2:  strcat R6, R2
+    ret R6
+empty:
+    ret ""
+.endf
+
+; Read full skill body on demand (progressive disclosure)
+.func read_skill_body(ref sk) -> ref
+    mov R1, sk->AilSkill.instructions
+    bnz.r R1, ret_body
+    mov R2, sk->AilSkill.path
+    bz.r R2, ret_empty
+    ncall "fs.read_file" (R2) -> (R3)
+    strcat R4, R3
+    call parse_skill_md (R4, sk->AilSkill.name) -> (R5, R6, R7)
+    ret R7
+ret_body:
+    ret R1
+ret_empty:
+    ret ""
+.endf
+
+; Tool closure for built-in `load_skill(name)`
+; UP[0] = skills_map, UP[1] = active_cb closure(skill_name, body_str) or null
+.func load_skill_fn(ref self_v, ref args, ref block) -> ref
+    mov R3, UP[0]
+    mov R4, UP[1]
+    len I0, args
+    bz I0, bad_arg
+    call core.to_str (args[0]) -> (R5)
+    mhas I1, R3, R5
+    bz I1, not_found
+    mget.r R6, R3, R5, null
+    call read_skill_body (R6) -> (R7)
+    bz.r R4, ret_it
+    lnew R8
+    lpush R8, R5, R7
+    calli R4 (null, R8, null) -> (R9)
+ret_it:
+    ret R7
+bad_arg:
+    call core.mk_exc ("ToolError", "load_skill requires a skill name") -> (R10)
+    throw R10
+not_found:
+    strcat R11, "unknown skill '", R5, "'"
+    call core.mk_exc ("ToolError", R11) -> (R10)
+    throw R10
+.endf
+
+; make_load_skill_tool(skills_map, on_activate_cb) -> AilTool
+.func make_load_skill_tool(ref skills_map, ref on_activate_cb) -> ref
+    lnew R2
+    lpush R2, "name"
+    mnew R3
+    closure load_skill_fn (skills_map, on_activate_cb) -> (R4)
+    mov R5, "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Name of the skill to load\"}},\"required\":[\"name\"]}"
+    call core.mk_tool ("load_skill", "Load full instructions for an available skill by name", R5, R2, R3, R4, null) -> (R6)
+    ret R6
+.endf

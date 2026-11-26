@@ -1,0 +1,109 @@
+# examples/ai_features.ail — End-to-end AI runtime constructs on MLWSVM
+
+use llm: :fast
+use db: :sessions
+
+# 1. Config-bound resource lookup (.ail.env)
+llm_cfg = Config.get(:llm, :fast)
+puts "cfg_model=#{llm_cfg["model"]}"
+
+# 2. Schema with compile-time JSON Schema + runtime validation
+schema Ticket
+  field :id, Int, "Ticket identifier"
+  field :title, String, "Short summary"
+  field :priority, Int = 3
+end
+
+t = Ticket.new(id: 42, title: "Fix parser")
+puts "ticket=#{t.id}:#{t.title}:p#{t.priority}"
+puts "schema_has_title=#{Ticket.json_schema.include?("\"title\"")}"
+
+missing_err = begin
+  Ticket.new(id: 1)
+rescue SchemaError => e
+  "schema_err"
+end
+puts "validation=#{missing_err}"
+
+# 3. Tool with VM-enforced cap.restrict sandbox
+tool :read_local, "Read a file under the current directory" do
+  param :path, String, "Relative file path"
+  returns String
+  capabilities fs: read_only("./"), net: :none, run: :none
+
+  File.read(path)
+end
+
+ok_read = read_local("README.md")
+puts "sandbox_allow=#{ok_read.include?("AIL")}"
+
+denied = begin
+  read_local("/etc/hosts")
+rescue PermissionError => e
+  "sandbox_denied"
+end
+puts "sandbox_block=#{denied}"
+
+# 4. Coded Guardrail
+guard NoPII do
+  check_output do |msg|
+    return reject("Contains SSN") if msg.match?(/\b\d{3}-\d{2}-\d{4}\b/)
+    allow
+  end
+end
+
+r1 = NoPII.check_output("All clear")
+r2 = NoPII.check_output("User SSN is 123-45-6789")
+puts "guard=#{r1.allowed?}:#{r2.rejected?}:#{r2.reason}"
+
+# 5. Append-only Context with named non-destructive views + checkpoints
+ctx = Context.new(:sessions)
+ctx.append(:user, "Find the bug")
+snap = ctx.checkpoint
+ctx.append(:tool_intermediate, "grep noise")
+ctx.append(:assistant, "Fixed it")
+
+ctx.define_view :llm_compact do |log|
+  log.drop(:tool_intermediate)
+end
+
+puts "ctx_audit=#{ctx.view(:audit).size}:compact=#{ctx.view(:llm_compact).size}"
+ctx.rewind(snap)
+puts "ctx_rewound=#{ctx.view(:audit).size}"
+
+# 6. Scoped budgets (within) & retries (retry_up_to)
+within_ok = within budget(timeout: 2.s, cost: 0.10d) do
+  10 + 32
+end
+puts "within_ok=#{within_ok}"
+
+within_to = within budget(timeout: 80.ms) do
+  sleep_ms(500)
+  "never"
+rescue BudgetExceeded => e
+  "budget_exceeded"
+end
+puts "within_timeout=#{within_to}"
+
+tries = 0
+retried = retry_up_to 3, backoff: :fixed, on: [RuntimeError] do |attempt|
+  tries = attempt
+  raise RuntimeError, "transient" if attempt < 3
+  "ok_on_#{attempt}"
+end
+puts "retry=#{retried}"
+
+# 7. Inline chaining operators: --> (pipe), | (fallback), & (parallel processes)
+double_it = ->(x) { x * 2 }
+add_one   = ->(x) { x + 1 }
+pipe = double_it --> add_one
+puts "pipe=#{pipe.call(5)}"
+
+flaky = ->(x) { raise RuntimeError, "fail" }
+safe  = ->(x) { x + 100 }
+fb = flaky | safe
+puts "fallback=#{fb.call(7)}"
+
+par = double_it & add_one
+par_res = par.call(10)
+puts "parallel=#{par_res[0]},#{par_res[1]}"

@@ -1,0 +1,551 @@
+; ail.context - Append-only multi-view Context with pluggable db persistence
+; Supports db drivers: "memory", "jsonl" (file-backed durable append-only log),
+; composable non-destructive LogView projections (drop, limit_tokens, compact_before),
+; checkpoints, rewind, fork, and LLM message conversion.
+
+.module ail.context
+.import ail.core as core
+.import ail.config as cfg
+.import ail.llm as llm
+.export init, new_ctx, append_event, project_view, events_to_messages
+
+inited:       .i64 0
+ctx_cls:      .zero 8
+logview_cls:  .zero 8
+
+; ---- Helper: unwrap raw events list from either AilObj(LogView) or raw list ----
+.func unwrap_events(ref v) -> ref
+    bz.r v, 1f
+    bisa v, core.AilObj, 2f
+    typeof I0, v
+    beq I0, 5, 3f
+1:  lnew R1
+    ret R1
+2:  mget.r R1, v->core.AilObj.fields, "__events__", null
+    bnz.r R1, 4f
+    lnew R1
+4:  ret R1
+3:  ret v
+.endf
+
+; ---- Wrap an events list in a LogView AilObj ----
+.func wrap_logview(ref ev_list) -> ref
+    bnz @inited, 1f
+    call init ()
+1:  mov R1, @logview_cls
+    call core.mk_obj (R1) -> (R2)
+    mset R2->core.AilObj.fields, "__events__", ev_list
+    ret R2
+.endf
+
+; ---- File-backed JSONL persistence helpers ----
+
+.func db_file_path(ref db_name, ref sess_id) -> ref
+    bz.r db_name, none
+    call core.to_str (db_name) -> (R2)
+    call cfg.get_binding_raw ("db", R2) -> (R3)
+    bz.r R3, none
+    mget.r R4, R3, "driver", "memory"
+    strcmp I0, R4, "jsonl"
+    bz I0, is_jsonl
+    strcmp I0, R4, "file"
+    bnz I0, none
+is_jsonl:
+    mget.r R5, R3, "path", null
+    bnz.r R5, ret_p
+    mget.r R6, R3, "dir", "."
+    mov R7, "default"
+    bz.r sess_id, 1f
+    call core.to_str (sess_id) -> (R7)
+1:  strcat R8, R7, ".jsonl"
+    ncall "path.join" (R6, R8) -> (R5)
+ret_p:
+    ret R5
+none:
+    ret null
+.endf
+
+.func load_jsonl(ref path) -> ref
+    lnew R1
+    bz.r path, done
+    ncall "fs.exists" (path) -> (I0)
+    bz I0, done
+.try done
+    ncall "fs.read_file" (path) -> (R2)
+    strcat R3, R2
+    ncall "text.lines" (R3) -> (R4)
+    len I1, R4
+    mov I2, 0
+ll:
+    bge I2, I1, done
+    mov R5, R4[I2]
+    inc I2
+    ncall "text.trim" (R5) -> (R5)
+    len I3, R5
+    bz I3, ll
+    ncall "json.parse" (R5) -> (R6)
+    call core.wrap_json (R6) -> (R7)
+    lpush R1, R7
+    jmp ll
+.endtry
+done:
+    ret R1
+.endf
+
+.func persist_event(ref path, ref ev_map)
+    bz.r path, 9f
+.try 9f
+    call core.unwrap_json (ev_map) -> (R2)
+    ncall "json.stringify" (R2, 0) -> (R3)
+    strcat R4, R3, "\n"
+    ncall "fs.open" (path, "a") -> (R5)
+    ncall "fs.write" (R5, R4)
+    ncall "fs.close" (R5)
+.endtry
+9:  ret
+.endf
+
+.func rewrite_jsonl(ref path, ref ev_list)
+    bz.r path, 9f
+.try 9f
+    bufnew R2, 0
+    len I0, ev_list
+    mov I1, 0
+1:  bge I1, I0, 2f
+    mov R3, ev_list[I1]
+    inc I1
+    call core.unwrap_json (R3) -> (R4)
+    ncall "json.stringify" (R4, 0) -> (R5)
+    bufcat R2, R5
+    bufcat R2, "\n"
+    jmp 1b
+2:  strcat R6, R2
+    ncall "fs.write_file" (path, R6)
+.endtry
+9:  ret
+.endf
+
+; ---- Public append_event(ctx_obj, kind_str, payload, meta_or_null) ----
+
+.func append_event(ref ctx, ref kind, ref payload, ref meta)
+    mget.r R4, ctx->core.AilObj.fields, "__events__", null
+    mnew R5
+    call core.to_str (kind) -> (R6)
+    mset R5, "kind", R6
+    mset R5, "payload", payload
+    bz.r meta, 1f
+    mset R5, "meta", meta
+1:  lpush R4, R5
+    mget.r R7, ctx->core.AilObj.fields, "__db_path__", null
+    call persist_event (R7, R5)
+    ret
+.endf
+
+; ---- LogView methods ----
+
+.func lv_drop(ref self_v, ref args, ref block) -> ref
+    call unwrap_events (self_v) -> (R3)
+    call core.to_str (args[0]) -> (R4)
+    lnew R5
+    len I0, R3
+    mov I1, 0
+1:  bge I1, I0, 2f
+    mov R6, R3[I1]
+    inc I1
+    mget.r R7, R6, "kind", ""
+    strcmp I2, R7, R4
+    bz I2, 1b
+    lpush R5, R6
+    jmp 1b
+2:  call wrap_logview (R5) -> (R8)
+    ret R8
+.endf
+
+; limit_tokens(max_tokens): keeps most recent events fitting approximate chars/4 budget
+.func lv_limit_tokens(ref self_v, ref args, ref block) -> ref
+    call unwrap_events (self_v) -> (R3)
+    call core.to_i64 (args[0]) -> (I0) ; max_tokens
+    mul I1, I0, 4                     ; approx char budget
+    len I2, R3
+    mov I3, I2
+    sub I3, I3, 1
+    mov I4, 0                         ; chars used
+    lnew R4                           ; reversed kept
+1:  blt I3, 0, 2f
+    mov R5, R3[I3]
+    mget.r R6, R5, "payload", ""
+    call core.to_str (R6) -> (R7)
+    len I5, R7
+    add I6, I4, I5
+    bgt I6, I1, 2f
+    mov I4, I6
+    lpush R4, R5
+    sub I3, I3, 1
+    jmp 1b
+2:  ; Reverse R4 back into chronological order
+    lnew R8
+    len I7, R4
+    sub I7, I7, 1
+3:  blt I7, 0, 4f
+    mov R9, R4[I7]
+    lpush R8, R9
+    sub I7, I7, 1
+    jmp 3b
+4:  call wrap_logview (R8) -> (R10)
+    ret R10
+.endf
+
+; compact_before(neg_or_pos_n, using: :fast)
+; Summarizes events before the last |n| entries using the named LLM (non-destructive!).
+.func lv_compact_before(ref self_v, ref args, ref block) -> ref
+    call unwrap_events (self_v) -> (R3)
+    call core.to_i64 (args[0]) -> (I0)
+    abs I1, I0                        ; keep_tail = |n|
+    len I2, R3
+    ble I2, I1, ret_same
+    sub I3, I2, I1                    ; split index: [0..I3) to compact, [I3..I2) kept
+    ; Extract model name from kwargs hash (args[1])
+    mov R4, "fast"
+    len I4, args
+    blt I4, 2, build_sum
+    mov R5, args[1]
+    typeof I5, R5
+    bne I5, 6, build_sum
+    mhas I6, R5, "using"
+    bz I6, build_sum
+    mget.r R6, R5, "using", null
+    call core.to_str (R6) -> (R4)
+build_sum:
+    bufnew R7, 0
+    bufcat R7, "Summarize these earlier conversation events concisely:\n"
+    mov I7, 0
+1:  bge I7, I3, 2f
+    mov R8, R3[I7]
+    inc I7
+    mget.r R9, R8, "kind", "event"
+    mget.r R10, R8, "payload", ""
+    call core.to_str (R10) -> (R11)
+    bufcat R7, "["
+    bufcat R7, R9
+    bufcat R7, "] "
+    bufcat R7, R11
+    bufcat R7, "\n"
+    jmp 1b
+2:  strcat R12, R7
+    lnew R13
+    mnew R14
+    mset R14, "role", "user"
+    mset R14, "content", R12
+    lpush R13, R14
+    call llm.chat (R4, R13, null, null) -> (R15)
+    mget.r R16, R15, "content", ""
+    ; Build new list: [summary_event, *tail]
+    lnew R17
+    mnew R18
+    mset R18, "kind", "summary"
+    mset R18, "payload", R16
+    lpush R17, R18
+    mov I8, I3
+3:  bge I8, I2, 4f
+    mov R19, R3[I8]
+    lpush R17, R19
+    inc I8
+    jmp 3b
+4:  call wrap_logview (R17) -> (R20)
+    ret R20
+ret_same:
+    ret self_v
+.endf
+
+.func lv_size(ref self_v, ref args, ref block) -> ref
+    call unwrap_events (self_v) -> (R3)
+    len I0, R3
+    call core.mk_int (I0) -> (R4)
+    ret R4
+.endf
+
+.func lv_to_a(ref self_v, ref args, ref block) -> ref
+    call unwrap_events (self_v) -> (R3)
+    ret R3
+.endf
+
+.func lv_each(ref self_v, ref args, ref block) -> ref
+    call unwrap_events (self_v) -> (R3)
+    call core.send_msg (R3, "each", args, block) -> (R4)
+    ret R4
+.endf
+
+.func lv_map(ref self_v, ref args, ref block) -> ref
+    call unwrap_events (self_v) -> (R3)
+    call core.send_msg (R3, "map", args, block) -> (R4)
+    ret R4
+.endf
+
+.func lv_select(ref self_v, ref args, ref block) -> ref
+    call unwrap_events (self_v) -> (R3)
+    call core.send_msg (R3, "select", args, block) -> (R4)
+    call wrap_logview (R4) -> (R5)
+    ret R5
+.endf
+
+; ---- Context methods ----
+
+.func ctx_append(ref self_v, ref args, ref block) -> ref
+    mov R3, args[0]
+    mov R4, args[1]
+    mov R5, null
+    len I0, args
+    blt I0, 3, 1f
+    mov R5, args[2]
+1:  call append_event (self_v, R3, R4, R5)
+    ret self_v
+.endf
+
+.func ctx_events(ref self_v, ref args, ref block) -> ref
+    mget.r R3, self_v->core.AilObj.fields, "__events__", null
+    ret R3
+.endf
+
+.func ctx_checkpoint(ref self_v, ref args, ref block) -> ref
+    mget.r R3, self_v->core.AilObj.fields, "__events__", null
+    len I0, R3
+    call core.mk_int (I0) -> (R4)
+    ret R4
+.endf
+
+.func ctx_rewind(ref self_v, ref args, ref block) -> ref
+    call core.to_i64 (args[0]) -> (I0)
+    mget.r R3, self_v->core.AilObj.fields, "__events__", null
+    lnew R4
+    len I1, R3
+    mov I2, 0
+1:  bge I2, I0, 2f
+    bge I2, I1, 2f
+    mov R5, R3[I2]
+    lpush R4, R5
+    inc I2
+    jmp 1b
+2:  mset self_v->core.AilObj.fields, "__events__", R4
+    mget.r R6, self_v->core.AilObj.fields, "__db_path__", null
+    call rewrite_jsonl (R6, R4)
+    ret self_v
+.endf
+
+.func ctx_fork(ref self_v, ref args, ref block) -> ref
+    mov R3, @ctx_cls
+    call core.mk_obj (R3) -> (R4)
+    ; Copy events list (fork is in-memory branch, doesn't overwrite parent db)
+    mget.r R5, self_v->core.AilObj.fields, "__events__", null
+    lnew R6
+    len I0, R5
+    mov I1, 0
+1:  bge I1, I0, 2f
+    mov R7, R5[I1]
+    lpush R6, R7
+    inc I1
+    jmp 1b
+2:  mset R4->core.AilObj.fields, "__events__", R6
+    ; Copy views map
+    mget.r R8, self_v->core.AilObj.fields, "__views__", null
+    mnew R9
+    mkeys R10, R8
+    len I2, R10
+    mov I3, 0
+3:  bge I3, I2, 4f
+    mov R11, R10[I3]
+    inc I3
+    mget.r R12, R8, R11, null
+    mset R9, R11, R12
+    jmp 3b
+4:  mset R4->core.AilObj.fields, "__views__", R9
+    mov R13, null
+    mset R4->core.AilObj.fields, "__db_path__", R13
+    ret R4
+.endf
+
+.func ctx_define_view(ref self_v, ref args, ref block) -> ref
+    call core.to_str (args[0]) -> (R3)
+    mget.r R4, self_v->core.AilObj.fields, "__views__", null
+    mset R4, R3, block
+    ret self_v
+.endf
+
+.func project_view(ref ctx, ref view_name) -> ref
+    mget.r R2, ctx->core.AilObj.fields, "__events__", null
+    bz.r view_name, ret_raw
+    call core.to_str (view_name) -> (R3)
+    strcmp I0, R3, "audit"
+    bz I0, ret_raw
+    mget.r R4, ctx->core.AilObj.fields, "__views__", null
+    mhas I1, R4, R3
+    bz I1, ret_raw
+    mget.r R5, R4, R3, null
+    call wrap_logview (R2) -> (R6)
+    lnew R7
+    lpush R7, R6
+    call core.call_val (R5, R7, null) -> (R8)
+    call unwrap_events (R8) -> (R9)
+    ret R9
+ret_raw:
+    ret R2
+.endf
+
+.func ctx_view(ref self_v, ref args, ref block) -> ref
+    call project_view (self_v, args[0]) -> (R3)
+    call wrap_logview (R3) -> (R4)
+    ret R4
+.endf
+
+; Convert projected event list into OpenAI/Anthropic-ready native chat messages list
+.func events_to_messages(ref ev_list) -> ref
+    lnew R1
+    len I0, ev_list
+    mov I1, 0
+em_loop:
+    bge I1, I0, em_done
+    mov R2, ev_list[I1]
+    inc I1
+    mget.r R3, R2, "kind", ""
+    mget.r R4, R2, "payload", ""
+
+    strcmp I2, R3, "user"
+    bz I2, add_user
+    strcmp I2, R3, "assistant"
+    bz I2, add_asst
+    strcmp I2, R3, "assistant_tool_calls"
+    bz I2, add_asst_tc
+    strcmp I2, R3, "tool_result"
+    bz I2, add_tool_res
+    strcmp I2, R3, "summary"
+    bz I2, add_sys_note
+    strcmp I2, R3, "knowledge"
+    bz I2, add_sys_note
+    strcmp I2, R3, "skill_body"
+    bz I2, add_skill_note
+    jmp em_loop
+
+add_user:
+    mnew R5
+    mset R5, "role", "user"
+    call core.to_str (R4) -> (R6)
+    mset R5, "content", R6
+    lpush R1, R5
+    jmp em_loop
+
+add_asst:
+    mnew R5
+    mset R5, "role", "assistant"
+    call core.to_str (R4) -> (R6)
+    mset R5, "content", R6
+    lpush R1, R5
+    jmp em_loop
+
+add_asst_tc:
+    ; payload is already a native assistant message map with tool_calls
+    lpush R1, R4
+    jmp em_loop
+
+add_tool_res:
+    ; payload is native {"role":"tool", "tool_call_id":..., "content":...}
+    lpush R1, R4
+    jmp em_loop
+
+add_sys_note:
+    mnew R5
+    mset R5, "role", "system"
+    call core.to_str (R4) -> (R6)
+    mset R5, "content", R6
+    lpush R1, R5
+    jmp em_loop
+
+add_skill_note:
+    mnew R5
+    mset R5, "role", "system"
+    call core.to_str (R4) -> (R6)
+    strcat R7, "[Loaded Skill Instructions]\n", R6
+    mset R5, "content", R7
+    lpush R1, R5
+    jmp em_loop
+
+em_done:
+    ret R1
+.endf
+
+; ---- Module init & Context.new constructor ----
+
+.func init
+    bnz @inited, 9f
+    call core.mk_class ("Context", null) -> (R0)
+    closure ctx_append () -> (R1)
+    call core.class_def_method (R0, "append", R1)
+    call core.class_def_method (R0, "attach", R1)
+    closure ctx_events () -> (R1)
+    call core.class_def_method (R0, "events", R1)
+    closure ctx_checkpoint () -> (R1)
+    call core.class_def_method (R0, "checkpoint", R1)
+    closure ctx_rewind () -> (R1)
+    call core.class_def_method (R0, "rewind", R1)
+    closure ctx_fork () -> (R1)
+    call core.class_def_method (R0, "fork", R1)
+    closure ctx_define_view () -> (R1)
+    call core.class_def_method (R0, "define_view", R1)
+    closure ctx_view () -> (R1)
+    call core.class_def_method (R0, "view", R1)
+    mov @ctx_cls, R0
+
+    call core.mk_class ("LogView", null) -> (R2)
+    closure lv_drop () -> (R1)
+    call core.class_def_method (R2, "drop", R1)
+    closure lv_limit_tokens () -> (R1)
+    call core.class_def_method (R2, "limit_tokens", R1)
+    closure lv_compact_before () -> (R1)
+    call core.class_def_method (R2, "compact_before", R1)
+    closure lv_size () -> (R1)
+    call core.class_def_method (R2, "size", R1)
+    call core.class_def_method (R2, "length", R1)
+    closure lv_to_a () -> (R1)
+    call core.class_def_method (R2, "to_a", R1)
+    closure lv_each () -> (R1)
+    call core.class_def_method (R2, "each", R1)
+    closure lv_map () -> (R1)
+    call core.class_def_method (R2, "map", R1)
+    closure lv_select () -> (R1)
+    call core.class_def_method (R2, "select", R1)
+    mov @logview_cls, R2
+    mov @inited, 1
+9:  ret
+.endf
+
+; new_ctx(args_list) -> Context AilObj
+; Accepts Context.new(), Context.new(:sessions), or Context.new(db: :sessions, id: "s1")
+.func new_ctx(ref args) -> ref
+    bnz @inited, 1f
+    call init ()
+1:  mov R1, null                      ; db_name
+    mov R2, null                      ; sess_id
+    bz.r args, make_obj
+    len I0, args
+    bz I0, make_obj
+    mov R3, args[0]
+    typeof I1, R3
+    beq I1, 6, from_kw
+    mov R1, R3
+    blt I0, 2, make_obj
+    mov R2, args[1]
+    jmp make_obj
+from_kw:
+    mget.r R1, R3, "db", null
+    mget.r R2, R3, "id", null
+make_obj:
+    call db_file_path (R1, R2) -> (R4)
+    call load_jsonl (R4) -> (R5)
+    mov R6, @ctx_cls
+    call core.mk_obj (R6) -> (R7)
+    mset R7->core.AilObj.fields, "__db__", R1
+    mset R7->core.AilObj.fields, "__id__", R2
+    mset R7->core.AilObj.fields, "__db_path__", R4
+    mset R7->core.AilObj.fields, "__events__", R5
+    mnew R8
+    mset R7->core.AilObj.fields, "__views__", R8
+    ret R7
+.endf

@@ -1,0 +1,46 @@
+# examples/agent_ollama.ail — Live local Ollama agent using tools, MCP, Skills & Guards
+# Run: ./ail run examples/agent_ollama.ail --env examples/ollama.ail.env
+
+use llm: :local
+use mcp: :repo_tools
+use skills: :local
+use db: :ollama_sessions
+
+tool :multiply, "Multiply two integers and return their exact product" do
+  param :a, Int, "First integer"
+  param :b, Int, "Second integer"
+  returns Int
+  a * b
+end
+
+guard NoPII do
+  check_output do |msg, ctx|
+    return redact(msg.gsub(/\b\d{3}-\d{2}-\d{4}\b/, "[REDACTED]")) if msg.match?(/\b\d{3}-\d{2}-\d{4}\b/)
+    allow
+  end
+end
+
+agent LocalAssistant do
+  model        :local
+  context_view :llm_compact
+  tools        [multiply]
+  mcp          [{ repo_tools: { only: [:word_count] } }]
+  skills       [:local]
+  guards       [NoPII]
+  limits       max_turns: 6
+
+  system <<~PROMPT
+    You are a concise assistant. Always use the provided tools for arithmetic and word counting.
+    Reply with a single short sentence containing the exact numbers.
+  PROMPT
+end
+
+ctx = Context.new(db: :ollama_sessions)
+ctx.define_view :llm_compact do |log|
+  log.drop(:tool_intermediate)
+end
+
+prompt_text = "Use the multiply tool to compute 37 * 43, and use the word_count tool to count the words in 'agents running natively on mlwsvm'. Report both numbers."
+reply = LocalAssistant.run(prompt_text, context: ctx)
+puts "ollama_reply=#{reply}"
+puts "audit_events=#{ctx.view(:audit).size}:compact_events=#{ctx.view(:llm_compact).size}"

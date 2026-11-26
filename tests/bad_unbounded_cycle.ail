@@ -1,0 +1,7 @@
+# tests/bad_unbounded_cycle.ail — Must fail `ail check` due to unbounded cycle
+
+flow InfiniteLoop
+  start :draft
+  edge :draft --> :critique
+  edge :critique --> :draft
+end

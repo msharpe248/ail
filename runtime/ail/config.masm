@@ -1,0 +1,38 @@
+; ail.config - Unified named resource bindings backed by MLWSVM env.*
+
+.module ail.config
+.export load_env, has_binding, get_binding_raw, require_binding
+
+; load_env(path): load a .ail.env / .mlws.env file into this process's environment
+.func load_env(ref path)
+    ncall "env.load" (path)
+    ret
+.endf
+
+; has_binding(kind, name) -> i64 (1 if present, 0 otherwise)
+.func has_binding(ref kind, ref name) -> i64
+    strcat R2, kind, ".", name
+    ncall "env.has" (R2) -> (I0)
+    ret I0
+.endf
+
+; get_binding_raw(kind, name) -> ref (native MLWSVM map/value, or null)
+.func get_binding_raw(ref kind, ref name) -> ref
+    strcat R2, kind, ".", name
+    ncall "env.get" (R2, null) -> (R3)
+    ret R3
+.endf
+
+; require_binding(kind, name) -> ref (raises Error if missing)
+.func require_binding(ref kind, ref name) -> ref
+    strcat R2, kind, ".", name
+    ncall "env.has" (R2) -> (I0)
+    bnz I0, 1f
+    new R3, Error
+    mov R3->Error.code, "E_CONFIG"
+    strcat R4, "missing resource binding '", R2, "' in environment (.ail.env)"
+    mov R3->Error.message, R4
+    throw R3
+1:  ncall "env.get" (R2, null) -> (R5)
+    ret R5
+.endf

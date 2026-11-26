@@ -1,0 +1,67 @@
+; ail.sandbox - Process-isolated capability sandboxing via MLWSVM cap.restrict
+
+.module ail.sandbox
+.export run_sandboxed, make_grants
+
+; make_grants(read_list, write_list, connect_list, listen_list, run_list, env_list) -> map
+; Any null list omits that capability kind (denied by cap.restrict).
+.func make_grants(ref rlist, ref wlist, ref clist, ref llist, ref runlist, ref envlist) -> ref
+    mnew R6
+    bz.r rlist, 1f
+    mset R6, "read", rlist
+1:  bz.r wlist, 2f
+    mset R6, "write", wlist
+2:  bz.r clist, 3f
+    mset R6, "connect", clist
+3:  bz.r llist, 4f
+    mset R6, "listen", llist
+4:  bz.r runlist, 5f
+    mset R6, "run", runlist
+5:  bz.r envlist, 6f
+    mset R6, "env", envlist
+6:  ret R6
+.endf
+
+; Child worker: applies cap.restrict(grants), calls fn(self, args, block),
+; sends back [1, result] on success or [0, exc] on catchable error.
+.func sandbox_worker(i64 parent, ref grants, ref fn, ref self_v, ref args, ref block)
+    bz.r grants, 1f
+    ncall "cap.restrict" (grants)
+1:
+.try failed
+    calli fn (self_v, args, block) -> (R6)
+.endtry
+    lnew R7
+    lpush R7, 1, R6
+    send parent, R7
+    ret
+failed:
+    catch R8
+    lnew R7
+    lpush R7, 0, R8
+    send parent, R7
+    ret
+.endf
+
+; run_sandboxed(grants, fn, self_v, args, block) -> ref
+; Runs fn inside an isolated monitored child process with cap.restrict(grants).
+; Re-throws any exception raised in the child.
+.func run_sandboxed(ref grants, ref fn, ref self_v, ref args, ref block) -> ref
+    spawnm sandbox_worker (PID, grants, fn, self_v, args, block) -> (I0)
+    recv R5
+    ; R5 could be a Down if child died before replying (e.g. hard quota)
+    bisa R5, Down, died_early
+    ; Normal reply [ok_flag, payload], then drain the Down
+    recv R6
+    mov I1, R5[0]
+    mov R7, R5[1]
+    bnz I1, ok
+    throw R7
+ok:
+    ret R7
+died_early:
+    new R8, Error
+    mov R8->Error.code, R5->Down.code
+    mov R8->Error.message, R5->Down.message
+    throw R8
+.endf

@@ -1,0 +1,7 @@
+/ail
+/build/
+*.o
+*.mlwso
+*.mlwsl
+*.tmp.masm
+.DS_Store

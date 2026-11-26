@@ -1,0 +1,82 @@
+# examples/full_spec_check.ail — Exercises the full AIL grammar & static verifier
+
+use llm: :reasoning, capabilities: [:tools, :structured]
+use s1: :router
+use db: :sessions
+use vector_db: :kb
+use mcp: :github
+use skills: :workspace
+
+schema TicketState
+  field :body, String, "Incoming ticket text"
+  field :queue, Enum[:billing, :tech, :fraud]
+  field :approved, Bool = false
+end
+
+tool :lookup_order, "Fetch order details" do
+  param :order_id, String, "Order ID"
+  returns String
+  capabilities fs: :none, net: ["api.internal:443"], run: :none
+  "order:#{order_id}"
+end
+
+guard SafeClassifier do
+  check_input do |msg, ctx|
+    verdict = decide using: :router, on: msg do
+      prob :prompt_injection?
+    end
+    reject("Injection suspected") if verdict.prompt_injection? > 0.8
+  end
+end
+
+skill :sql_migration, "Safely design SQL migrations" do
+  tools [lookup_order]
+  capabilities fs: read_only("./")
+  instructions <<~MD
+    Always check backward compatibility before dropping columns.
+  MD
+end
+
+agent Researcher do
+  model        :reasoning
+  context_view :llm_compact
+  tools        [lookup_order]
+  mcp          [:github]
+  skills       [:workspace, :sql_migration]
+  guards       [SafeClassifier]
+  capabilities fs: read_only("./")
+  limits       max_turns: 8, cost: 0.25d, retries: 2
+
+  system <<~PROMPT
+    You are a precise researcher. Cite sources accurately.
+  PROMPT
+end
+
+flow SupportFlow
+  state TicketState
+  start :intake
+
+  node :intake --> :triage
+
+  decide :triage, using: :router do
+    choice :queue, [:billing, :tech, :fraud]
+    score  :urgency, 1..5
+  end
+
+  edge :triage   --> :billing,     when: ->(d) { d.queue == :billing }
+  edge :triage   --> :tech,        when: ->(d) { d.queue == :tech }
+  edge :triage   --> :fraud,       when: ->(d) { d.queue == :fraud }
+  edge :triage   --> :deep_review
+  edge :billing  --> :draft
+  edge :tech     --> :draft
+  edge :fraud    --> :draft
+  edge :deep_review --> :draft
+  edge :draft    --> :critique
+  edge :critique --> :draft, unless: ->(s) { s.approved }, max: 3
+  edge :critique --> :done,  when:   ->(s) { s.approved }
+end
+
+a2a_agent "support-router", version: "0.1.0" do
+  description "Triages and resolves customer support tickets"
+  handler SupportFlow
+end

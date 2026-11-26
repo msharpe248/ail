@@ -1,0 +1,421 @@
+; ail.llm - Unified generative LLM drivers (openai/Ollama/vLLM, anthropic, mock)
+; Logical model names are resolved at runtime from MLWSVM env (`llm.<name>`).
+
+.module ail.llm
+.import ail.core as core
+.import ail.config as cfg
+.import std.http as http
+.export chat
+
+; ---- Helper: count assistant messages in history (for scripted mock driver) ----
+
+.func count_assistant_msgs(ref msgs) -> i64
+    len I0, msgs
+    mov I1, 0
+    mov I2, 0
+1:  bge I1, I0, 2f
+    mov R1, msgs[I1]
+    inc I1
+    mget.r R2, R1, "role", ""
+    strcmp I3, R2, "assistant"
+    bnz I3, 1b
+    inc I2
+    jmp 1b
+2:  ret I2
+.endf
+
+; ---- Helper: extract integer safely from a native JSON map ----
+
+.func map_get_i64(ref m, ref key, i64 def) -> i64
+    bz.r m, ret_def
+    mhas I0, m, key
+    bz I0, ret_def
+.try ret_def
+    mget I1, m, key, def
+    ret I1
+.endtry
+ret_def:
+    catch R9
+    ret def
+.endf
+
+; ---- Mock driver (deterministic multi-turn & tool-call testing) ----
+
+.func chat_mock(ref mcfg, ref msgs, ref tools_spec) -> ref
+    mnew R3                           ; normalized result
+    lnew R4                           ; tool_calls
+    mnew R5                           ; usage
+    mset R5, "prompt_tokens", 10
+    mset R5, "completion_tokens", 8
+    mset R5, "total_tokens", 18
+    mset R3, "usage", R5
+    mset R3, "model", "mock"
+
+    ; If mcfg has "script" (list of scripted turns), pick by assistant turn count
+    mhas I0, mcfg, "script"
+    bz I0, mock_single
+    mget.r R6, mcfg, "script", null
+    call count_assistant_msgs (msgs) -> (I1)
+    len I2, R6
+    bz I2, mock_single
+    blt I1, I2, 1f
+    sub I1, I2, 1
+1:  mov R7, R6[I1]
+    typeof I3, R7
+    beq I3, 1, mock_str_turn
+    ; Turn object: {"content": "...", "tool_calls": [...]}
+    mget.r R8, R7, "content", ""
+    mset R3, "content", R8
+    mhas I4, R7, "tool_calls"
+    bz I4, mock_done_tc
+    mget.r R9, R7, "tool_calls", null
+    mset R3, "tool_calls", R9
+    ret R3
+mock_str_turn:
+    mset R3, "content", R7
+mock_done_tc:
+    mset R3, "tool_calls", R4
+    ret R3
+
+mock_single:
+    mget.r R8, mcfg, "reply", "mock response"
+    mset R3, "content", R8
+    mset R3, "tool_calls", R4
+    ret R3
+.endf
+
+; ---- OpenAI-compatible HTTP/TLS driver (OpenAI, Ollama /v1, vLLM, llama.cpp) ----
+
+.func chat_openai(ref mcfg, ref msgs, ref tools_spec, ref opts) -> ref
+    mget.r R4, mcfg, "url", "https://api.openai.com/v1"
+    mget.r R5, mcfg, "model", ""
+    mget.r R6, mcfg, "api_key", null
+    call map_get_i64 (mcfg, "timeout_ms", 120000) -> (I0)
+    bz.r opts, 1f
+    call map_get_i64 (opts, "timeout_ms", I0) -> (I0)
+
+1:  ; Strip trailing slash from url if any, then append /chat/completions
+    ncall "text.ends_with" (R4, "/") -> (I1)
+    bz I1, 2f
+    len I2, R4
+    sub I2, I2, 1
+    substr R4, R4, 0, I2
+2:  strcat R7, R4, "/chat/completions"
+
+    ; Request body map
+    mnew R8
+    mset R8, "model", R5
+    mset R8, "messages", msgs
+    bz.r tools_spec, 3f
+    len I3, tools_spec
+    bz I3, 3f
+    mset R8, "tools", tools_spec
+3:  bz.r opts, 4f
+    mhas I4, opts, "temperature"
+    bz I4, 4f
+    mget F0, opts, "temperature", 0.0
+    mset R8, "temperature", F0
+4:  ncall "json.stringify" (R8, 0) -> (R9)
+
+    ; Request headers
+    mnew R10
+    mset R10, "Content-Type", "application/json"
+    bz.r R6, 5f
+    len I5, R6
+    bz I5, 5f
+    strcat R11, "Bearer ", R6
+    mset R10, "Authorization", R11
+
+5:  call http.request ("POST", R7, R10, R9, I0) -> (R12)
+    mget I6, R12, "status", 0
+    mget.r R13, R12, "body", ""
+    blt I6, 200, http_err
+    bge I6, 300, http_err
+
+.try json_err
+    ncall "json.parse" (R13) -> (R14)
+.endtry
+
+    ; Extract choices[0].message
+    mget.r R15, R14, "choices", null
+    bz.r R15, bad_resp
+    len I7, R15
+    bz I7, bad_resp
+    mov R16, R15[0]
+    mget.r R17, R16, "message", null
+    bz.r R17, bad_resp
+
+    mget.r R18, R17, "content", ""
+    bnz.r R18, 6f
+    mov R18, ""
+6:
+    ; Normalize tool_calls: [{"id", "name", "arguments": map}]
+    lnew R19
+    mhas I8, R17, "tool_calls"
+    bz I8, parse_usage
+    mget.r R20, R17, "tool_calls", null
+    bz.r R20, parse_usage
+    typeof I9, R20
+    bne I9, 5, parse_usage
+    len I10, R20
+    mov I11, 0
+tc_loop:
+    bge I11, I10, parse_usage
+    mov R21, R20[I11]
+    inc I11
+    mget.r R22, R21, "id", "call_0"
+    mget.r R23, R21, "function", null
+    bz.r R23, tc_loop
+    mget.r R24, R23, "name", ""
+    mget.r R25, R23, "arguments", null
+    ; arguments may be a JSON string (OpenAI) or already a map (some local servers)
+    bz.r R25, tc_empty_args
+    typeof I12, R25
+    beq I12, 6, tc_args_ready
+    beq I12, 1, tc_parse_args
+tc_empty_args:
+    mnew R26
+    jmp tc_store
+tc_parse_args:
+.try tc_empty_args
+    ncall "json.parse" (R25) -> (R26)
+.endtry
+    jmp tc_store
+tc_args_ready:
+    mov R26, R25
+tc_store:
+    mnew R27
+    mset R27, "id", R22
+    mset R27, "name", R24
+    mset R27, "arguments", R26
+    lpush R19, R27
+    jmp tc_loop
+
+parse_usage:
+    mnew R28
+    mget.r R29, R14, "usage", null
+    call map_get_i64 (R29, "prompt_tokens", 0) -> (I13)
+    call map_get_i64 (R29, "completion_tokens", 0) -> (I14)
+    call map_get_i64 (R29, "total_tokens", 0) -> (I15)
+    bnz I15, 7f
+    add I15, I13, I14
+7:  mset R28, "prompt_tokens", I13
+    mset R28, "completion_tokens", I14
+    mset R28, "total_tokens", I15
+
+    mnew R30
+    mset R30, "content", R18
+    mset R30, "tool_calls", R19
+    mset R30, "usage", R28
+    mset R30, "model", R5
+    mset R30, "raw", R14
+    ret R30
+
+http_err:
+    tostr R20, I6
+    strcat R21, "LLM HTTP error ", R20, " from ", R7, ": ", R13
+    call core.mk_exc ("LLMError", R21) -> (R22)
+    throw R22
+json_err:
+    catch R20
+    strcat R21, "LLM invalid JSON response from ", R7
+    call core.mk_exc ("LLMError", R21) -> (R22)
+    throw R22
+bad_resp:
+    strcat R21, "LLM response missing choices[0].message from ", R7
+    call core.mk_exc ("LLMError", R21) -> (R22)
+    throw R22
+.endf
+
+; ---- Anthropic Messages API driver ----
+
+.func chat_anthropic(ref mcfg, ref msgs, ref tools_spec, ref opts) -> ref
+    mget.r R4, mcfg, "url", "https://api.anthropic.com"
+    mget.r R5, mcfg, "model", "claude-sonnet-4-20250514"
+    mget.r R6, mcfg, "api_key", ""
+    call map_get_i64 (mcfg, "timeout_ms", 120000) -> (I0)
+    call map_get_i64 (mcfg, "max_tokens", 4096) -> (I1)
+
+    ncall "text.ends_with" (R4, "/") -> (I2)
+    bz I2, 1f
+    len I3, R4
+    sub I3, I3, 1
+    substr R4, R4, 0, I3
+1:  strcat R7, R4, "/v1/messages"
+
+    ; Separate system prompt from user/assistant messages
+    bufnew R8, 0
+    lnew R9
+    len I4, msgs
+    mov I5, 0
+m_loop:
+    bge I5, I4, m_done
+    mov R10, msgs[I5]
+    inc I5
+    mget.r R11, R10, "role", "user"
+    mget.r R12, R10, "content", ""
+    strcmp I6, R11, "system"
+    bnz I6, m_non_sys
+    len I7, R8
+    bz I7, 2f
+    bufcat R8, "\n\n"
+2:  bufcat R8, R12
+    jmp m_loop
+m_non_sys:
+    ; Map tool role to user message text for simple compatibility
+    strcmp I6, R11, "tool"
+    bnz I6, m_keep
+    mnew R13
+    mset R13, "role", "user"
+    strcat R14, "Tool result: ", R12
+    mset R13, "content", R14
+    lpush R9, R13
+    jmp m_loop
+m_keep:
+    mnew R13
+    mset R13, "role", R11
+    mset R13, "content", R12
+    lpush R9, R13
+    jmp m_loop
+m_done:
+    mnew R15
+    mset R15, "model", R5
+    mset R15, "max_tokens", I1
+    mset R15, "messages", R9
+    len I7, R8
+    bz I7, 3f
+    strcat R16, R8
+    mset R15, "system", R16
+3:  ; Convert OpenAI tools_spec -> Anthropic tools
+    bz.r tools_spec, 4f
+    len I8, tools_spec
+    bz I8, 4f
+    lnew R17
+    mov I9, 0
+at_loop:
+    bge I9, I8, at_done
+    mov R18, tools_spec[I9]
+    inc I9
+    mget.r R19, R18, "function", null
+    bz.r R19, at_loop
+    mnew R20
+    mget.r R21, R19, "name", ""
+    mget.r R22, R19, "description", ""
+    mget.r R23, R19, "parameters", null
+    mset R20, "name", R21
+    mset R20, "description", R22
+    mset R20, "input_schema", R23
+    lpush R17, R20
+    jmp at_loop
+at_done:
+    mset R15, "tools", R17
+4:  ncall "json.stringify" (R15, 0) -> (R24)
+
+    mnew R25
+    mset R25, "Content-Type", "application/json"
+    mset R25, "x-api-key", R6
+    mset R25, "anthropic-version", "2023-06-01"
+    call http.request ("POST", R7, R25, R24, I0) -> (R26)
+    mget I10, R26, "status", 0
+    mget.r R27, R26, "body", ""
+    blt I10, 200, a_http_err
+    bge I10, 300, a_http_err
+    ncall "json.parse" (R27) -> (R28)
+
+    bufnew R29, 0
+    lnew R30
+    mget.r R20, R28, "content", null
+    bz.r R20, a_usage
+    len I11, R20
+    mov I12, 0
+ac_loop:
+    bge I12, I11, a_usage
+    mov R21, R20[I12]
+    inc I12
+    mget.r R22, R21, "type", ""
+    strcmp I13, R22, "text"
+    bnz I13, ac_tool
+    mget.r R23, R21, "text", ""
+    bufcat R29, R23
+    jmp ac_loop
+ac_tool:
+    strcmp I13, R22, "tool_use"
+    bnz I13, ac_loop
+    mnew R24
+    mget.r R25, R21, "id", "call_0"
+    mget.r R26, R21, "name", ""
+    mget.r R27, R21, "input", null
+    mset R24, "id", R25
+    mset R24, "name", R26
+    mset R24, "arguments", R27
+    lpush R30, R24
+    jmp ac_loop
+
+a_usage:
+    mnew R21
+    mget.r R22, R28, "usage", null
+    call map_get_i64 (R22, "input_tokens", 0) -> (I14)
+    call map_get_i64 (R22, "output_tokens", 0) -> (I15)
+    add I16, I14, I15
+    mset R21, "prompt_tokens", I14
+    mset R21, "completion_tokens", I15
+    mset R21, "total_tokens", I16
+
+    mnew R23
+    strcat R24, R29
+    mset R23, "content", R24
+    mset R23, "tool_calls", R30
+    mset R23, "usage", R21
+    mset R23, "model", R5
+    mset R23, "raw", R28
+    ret R23
+
+a_http_err:
+    tostr R20, I10
+    strcat R21, "Anthropic HTTP error ", R20, ": ", R27
+    call core.mk_exc ("LLMError", R21) -> (R22)
+    throw R22
+.endf
+
+; ---- Public entrypoint: chat(model_name, messages, tools_spec, opts) -> response map ----
+
+.func chat(ref model_name, ref messages, ref tools_spec, ref opts) -> ref
+    call core.to_str (model_name) -> (R4)
+    call cfg.require_binding ("llm", R4) -> (R5)
+    mget.r R6, R5, "driver", "openai"
+
+    strcmp I0, R6, "mock"
+    bnz I0, chk_oai
+    call chat_mock (R5, messages, tools_spec) -> (R7)
+    jmp emit_evt
+chk_oai:
+    strcmp I0, R6, "openai"
+    bz I0, do_oai
+    strcmp I0, R6, "ollama"
+    bnz I0, chk_ant
+do_oai:
+    call chat_openai (R5, messages, tools_spec, opts) -> (R7)
+    jmp emit_evt
+chk_ant:
+    strcmp I0, R6, "anthropic"
+    bnz I0, bad_drv
+    call chat_anthropic (R5, messages, tools_spec, opts) -> (R7)
+    jmp emit_evt
+
+emit_evt:
+    ncall "monitor.on" -> (I1)
+    bz I1, ret_res
+    mnew R8
+    mset R8, "binding", R4
+    mset R8, "driver", R6
+    mget.r R9, R7, "usage", null
+    mset R8, "usage", R9
+    ncall "monitor.event" ("ail.llm.chat", R8)
+ret_res:
+    ret R7
+
+bad_drv:
+    strcat R8, "unknown llm driver '", R6, "' for binding llm.", R4
+    call core.mk_exc ("ConfigError", R8) -> (R9)
+    throw R9
+.endf

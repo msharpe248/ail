@@ -1,0 +1,401 @@
+; ail.mcp_client - MCP JSON-RPC 2.0 client (stdio subprocess & Streamable HTTP)
+; Connects via named `mcp.<name>` config bindings and exposes remote tools as AilTool objects.
+
+.module ail.mcp_client
+.import ail.core as core
+.import ail.config as cfg
+.import std.http as http
+.export connect, close, list_tools, call_tool, discover_tools, list_resources, read_resource, connect_obj
+
+.struct McpClient
+    name: ref
+    transport: ref    ; "stdio" or "http"
+    proc: ref         ; os.spawn handle (stdio)
+    in_h: ref         ; stdin pipe handle (stdio)
+    out_h: ref        ; stdout pipe handle (stdio)
+    url: ref          ; endpoint URL (http)
+    headers: ref      ; extra HTTP headers map
+    session_id: ref   ; optional mcp-session-id
+    next_id: i64
+.ends
+
+; Low-level JSON-RPC call(client, method, params_or_null, expect_reply) -> result_map or null
+.func rpc_call(ref cl, ref method, ref params, i64 expect_reply) -> ref
+    mnew R4
+    mset R4, "jsonrpc", "2.0"
+    mset R4, "method", method
+    bz.r params, 1f
+    mset R4, "params", params
+1:  bz expect_reply, 2f
+    mov I0, cl->McpClient.next_id
+    inc I0
+    mov cl->McpClient.next_id, I0
+    mset R4, "id", I0
+2:  ncall "json.stringify" (R4, 0) -> (R5)
+
+    strcmp I1, cl->McpClient.transport, "stdio"
+    bnz I1, do_http
+
+    ; ---- stdio transport ----
+    strcat R6, R5, "\n"
+    ncall "fs.write" (cl->McpClient.in_h, R6)
+    bz expect_reply, ret_null
+read_loop:
+    ncall "fs.read_line" (cl->McpClient.out_h) -> (R7)
+    bz.r R7, eof_err
+    ncall "text.trim" (R7) -> (R7)
+    len I2, R7
+    bz I2, read_loop
+    ncall "json.parse" (R7) -> (R8)
+    jmp check_rpc
+
+    ; ---- Streamable HTTP transport ----
+do_http:
+    mnew R9
+    mset R9, "Content-Type", "application/json"
+    mset R9, "Accept", "application/json"
+    mov R10, cl->McpClient.headers
+    bz.r R10, 4f
+    mkeys R11, R10
+    len I2, R11
+    mov I3, 0
+3:  bge I3, I2, 4f
+    mov R12, R11[I3]
+    inc I3
+    mget.r R13, R10, R12, ""
+    mset R9, R12, R13
+    jmp 3b
+4:  mov R14, cl->McpClient.session_id
+    bz.r R14, 5f
+    mset R9, "MCP-Session-Id", R14
+5:  call http.request ("POST", cl->McpClient.url, R9, R5, 30000) -> (R15)
+    mget I4, R15, "status", 0
+    mget.r R16, R15, "headers", null
+    bz.r R16, 6f
+    mhas I5, R16, "mcp-session-id"
+    bz I5, 6f
+    mget.r R17, R16, "mcp-session-id", null
+    mov cl->McpClient.session_id, R17
+6:  bz expect_reply, ret_null
+    blt I4, 200, http_fail
+    bge I4, 300, http_fail
+    mget.r R18, R15, "body", ""
+    ncall "json.parse" (R18) -> (R8)
+
+check_rpc:
+    mhas I6, R8, "error"
+    bz I6, ret_ok
+    mget.r R19, R8, "error", null
+    mget.r R20, R19, "message", "MCP JSON-RPC error"
+    strcat R21, "MCP error from ", cl->McpClient.name, ": ", R20
+    call core.mk_exc ("MCPError", R21) -> (R22)
+    throw R22
+ret_ok:
+    mget.r R19, R8, "result", null
+    ret R19
+ret_null:
+    ret null
+eof_err:
+    strcat R21, "MCP stdio server '", cl->McpClient.name, "' closed stdout unexpectedly"
+    call core.mk_exc ("MCPError", R21) -> (R22)
+    throw R22
+http_fail:
+    tostr R20, I4
+    strcat R21, "MCP HTTP error ", R20, " from ", cl->McpClient.name
+    call core.mk_exc ("MCPError", R21) -> (R22)
+    throw R22
+.endf
+
+; connect(binding_name) -> McpClient
+.func connect(ref binding_name) -> ref
+    call core.to_str (binding_name) -> (R1)
+    call cfg.require_binding ("mcp", R1) -> (R2)
+    mget.r R3, R2, "transport", "stdio"
+
+    new R4, McpClient
+    mov R4->McpClient.name, R1
+    mov R4->McpClient.transport, R3
+    mov R4->McpClient.next_id, 0
+
+    strcmp I0, R3, "stdio"
+    bnz I0, conn_http
+
+    mget.r R5, R2, "cmd", null
+    bz.r R5, bad_cfg
+    ncall "os.spawn" (R5, 3) -> (R6, R7, R8, R9)
+    mov R4->McpClient.proc, R6
+    mov R4->McpClient.in_h, R7
+    mov R4->McpClient.out_h, R8
+    jmp handshake
+
+conn_http:
+    strcmp I0, R3, "http"
+    bnz I0, bad_cfg
+    mget.r R5, R2, "url", null
+    bz.r R5, bad_cfg
+    mov R4->McpClient.url, R5
+    mget.r R6, R2, "headers", null
+    mov R4->McpClient.headers, R6
+
+handshake:
+    mnew R10
+    mset R10, "protocolVersion", "2025-03-26"
+    mnew R11
+    mset R10, "capabilities", R11
+    mnew R12
+    mset R12, "name", "ail-client"
+    mset R12, "version", "0.2.0"
+    mset R10, "clientInfo", R12
+    call rpc_call (R4, "initialize", R10, 1) -> (R13)
+    call rpc_call (R4, "notifications/initialized", null, 0) -> (R14)
+    ret R4
+
+bad_cfg:
+    strcat R10, "invalid mcp.", R1, " binding config"
+    call core.mk_exc ("ConfigError", R10) -> (R11)
+    throw R11
+.endf
+
+; close(client)
+.func close(ref cl)
+    bz.r cl, 9f
+    strcmp I0, cl->McpClient.transport, "stdio"
+    bnz I0, 9f
+.try 1f
+    bz.r cl->McpClient.in_h, 1f
+    ncall "fs.close" (cl->McpClient.in_h)
+.endtry
+1:
+.try 2f
+    bz.r cl->McpClient.out_h, 2f
+    ncall "fs.close" (cl->McpClient.out_h)
+.endtry
+2:
+.try 9f
+    bz.r cl->McpClient.proc, 9f
+    ncall "os.kill" (cl->McpClient.proc, false)
+    ncall "os.wait" (cl->McpClient.proc) -> (I1)
+.endtry
+9:  ret
+.endf
+
+; list_tools(client) -> list of raw MCP tool descriptor maps
+.func list_tools(ref cl) -> ref
+    call rpc_call (cl, "tools/list", null, 1) -> (R1)
+    bz.r R1, empty_l
+    mget.r R2, R1, "tools", null
+    bnz.r R2, 1f
+empty_l:
+    lnew R2
+1:  ret R2
+.endf
+
+; call_tool(client, tool_name, args_map) -> string (unwrapped MCP text content)
+.func call_tool(ref cl, ref tool_name, ref args_map) -> ref
+    mnew R3
+    mset R3, "name", tool_name
+    bz.r args_map, 1f
+    call core.unwrap_json (args_map) -> (R4)
+    mset R3, "arguments", R4
+    jmp 2f
+1:  mnew R4
+    mset R3, "arguments", R4
+2:  call rpc_call (cl, "tools/call", R3, 1) -> (R5)
+    ; Check isError
+    mhas I0, R5, "isError"
+    bz I0, extract_txt
+    mget I1, R5, "isError", 0
+    bz I1, extract_txt
+    ; Extract error text
+    mget.r R6, R5, "content", null
+    mov R7, "MCP tool returned error"
+    bz.r R6, raise_te
+    len I2, R6
+    bz I2, raise_te
+    mov R8, R6[0]
+    mget.r R7, R8, "text", "MCP tool returned error"
+raise_te:
+    call core.mk_exc ("ToolError", R7) -> (R9)
+    throw R9
+
+extract_txt:
+    mget.r R6, R5, "content", null
+    bz.r R6, ret_empty
+    len I2, R6
+    bz I2, ret_empty
+    bufnew R7, 0
+    mov I3, 0
+et_loop:
+    bge I3, I2, et_done
+    mov R8, R6[I3]
+    inc I3
+    mget.r R9, R8, "text", ""
+    len I4, R7
+    bz I4, 3f
+    bufcat R7, "\n"
+3:  bufcat R7, R9
+    jmp et_loop
+et_done:
+    strcat R10, R7
+    ret R10
+ret_empty:
+    ret ""
+.endf
+
+; Closure backing a discovered remote MCP tool
+; UP[0] = McpClient, UP[1] = tool_name, UP[2] = param_names list
+.func remote_tool_fn(ref self_v, ref args, ref block) -> ref
+    mov R3, UP[0]                     ; McpClient
+    mov R4, UP[1]                     ; tool_name
+    mov R5, UP[2]                     ; param_names
+    ; Build args map from either 1 map arg or positional list
+    mnew R6
+    len I0, args
+    bz I0, go
+    mov R7, args[0]
+    typeof I1, R7
+    bne I1, 6, from_pos
+    mov R6, R7
+    jmp go
+from_pos:
+    len I2, R5
+    mov I3, 0
+fp_loop:
+    bge I3, I2, go
+    bge I3, I0, go
+    mov R8, R5[I3]
+    mov R9, args[I3]
+    mset R6, R8, R9
+    inc I3
+    jmp fp_loop
+go:
+    call call_tool (R3, R4, R6) -> (R10)
+    ret R10
+.endf
+
+; Check if string name is in an optional AIL list of symbols/strings
+.func list_has_name(ref lst, ref name) -> i64
+    len I0, lst
+    mov I1, 0
+1:  bge I1, I0, 2f
+    mov R2, lst[I1]
+    inc I1
+    call core.to_str (R2) -> (R3)
+    strcmp I2, R3, name
+    bnz I2, 1b
+    ret 1
+2:  ret 0
+.endf
+
+; discover_tools(client, only_list_or_null, except_list_or_null) -> list[AilTool]
+.func discover_tools(ref cl, ref only_l, ref except_l) -> ref
+    call list_tools (cl) -> (R3)
+    lnew R4
+    len I0, R3
+    mov I1, 0
+dt_loop:
+    bge I1, I0, dt_done
+    mov R5, R3[I1]
+    inc I1
+    mget.r R6, R5, "name", ""
+    ; Filter by only_l
+    bz.r only_l, chk_exc
+    call list_has_name (only_l, R6) -> (I2)
+    bz I2, dt_loop
+chk_exc:
+    bz.r except_l, mk_t
+    call list_has_name (except_l, R6) -> (I2)
+    bnz I2, dt_loop
+mk_t:
+    mget.r R7, R5, "description", ""
+    mget.r R8, R5, "inputSchema", null
+    bnz.r R8, 1f
+    mnew R8
+1:  ncall "json.stringify" (R8, 0) -> (R9)
+    ; Collect parameter names from inputSchema.properties
+    lnew R10
+    mget.r R11, R8, "properties", null
+    bz.r R11, 2f
+    mkeys R10, R11
+2:  mnew R12                          ; empty defaults map
+    closure remote_tool_fn (cl, R6, R10) -> (R13)
+    call core.mk_tool (R6, R7, R9, R10, R12, R13, null) -> (R14)
+    lpush R4, R14
+    jmp dt_loop
+dt_done:
+    ret R4
+.endf
+
+; list_resources(client) -> list
+.func list_resources(ref cl) -> ref
+    call rpc_call (cl, "resources/list", null, 1) -> (R1)
+    bz.r R1, 1f
+    mget.r R2, R1, "resources", null
+    bnz.r R2, 2f
+1:  lnew R2
+2:  ret R2
+.endf
+
+; read_resource(client, uri) -> string
+.func read_resource(ref cl, ref uri) -> ref
+    mnew R2
+    mset R2, "uri", uri
+    call rpc_call (cl, "resources/read", R2, 1) -> (R3)
+    mget.r R4, R3, "contents", null
+    bz.r R4, 1f
+    len I0, R4
+    bz I0, 1f
+    mov R5, R4[0]
+    mget.r R6, R5, "text", ""
+    ret R6
+1:  ret ""
+.endf
+
+; ---- OOP wrapper for AIL code: MCP.connect(:binding) ----
+
+.func obj_list_tools(ref self_v, ref args, ref block) -> ref
+    mget.r R3, self_v->core.AilObj.fields, "__cl__", null
+    call list_tools (R3) -> (R4)
+    call core.wrap_json (R4) -> (R5)
+    ret R5
+.endf
+
+.func obj_call_tool(ref self_v, ref args, ref block) -> ref
+    mget.r R3, self_v->core.AilObj.fields, "__cl__", null
+    call core.to_str (args[0]) -> (R4)
+    mov R5, null
+    len I0, args
+    blt I0, 2, 1f
+    mov R5, args[1]
+1:  call call_tool (R3, R4, R5) -> (R6)
+    ret R6
+.endf
+
+.func obj_read_resource(ref self_v, ref args, ref block) -> ref
+    mget.r R3, self_v->core.AilObj.fields, "__cl__", null
+    call core.to_str (args[0]) -> (R4)
+    call read_resource (R3, R4) -> (R5)
+    ret R5
+.endf
+
+.func obj_close(ref self_v, ref args, ref block) -> ref
+    mget.r R3, self_v->core.AilObj.fields, "__cl__", null
+    call close (R3)
+    ret null
+.endf
+
+.func connect_obj(ref args) -> ref
+    call connect (args[0]) -> (R1)
+    call core.mk_class ("McpClient", null) -> (R2)
+    closure obj_list_tools () -> (R3)
+    call core.class_def_method (R2, "list_tools", R3)
+    closure obj_call_tool () -> (R3)
+    call core.class_def_method (R2, "call_tool", R3)
+    closure obj_read_resource () -> (R3)
+    call core.class_def_method (R2, "read_resource", R3)
+    closure obj_close () -> (R3)
+    call core.class_def_method (R2, "close", R3)
+    call core.mk_obj (R2) -> (R4)
+    mset R4->core.AilObj.fields, "__cl__", R1
+    ret R4
+.endf

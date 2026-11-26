@@ -1,0 +1,2658 @@
+; ail.core - Uniform tagged runtime values, Ruby-like OOP, iterators,
+; schemas, tools, guards, append-only Context with views, and stdlib builtins.
+
+.module ail.core
+.import ail.sandbox as sandbox
+.import ail.config as cfg
+
+.export AilInt, AilFloat, AilBool, AilSym, AilDur, AilRange, AilRegex
+.export AilClosure, AilClass, AilObj, AilCell, AilExc, AilTool, AilGuard
+.export AilGuardResult, AilSchema, AilBudget, AilContext
+.export init, mk_int, mk_float, mk_bool, mk_sym, mk_dur, mk_range, mk_regex
+.export mk_closure, mk_cell, cell_get, cell_set, mk_exc
+.export mk_class, class_def_method, mk_obj, mk_schema, mk_tool, mk_guard, mk_context
+.export is_truthy, to_str, to_i64, to_f64, wrap_json, unwrap_json
+.export exc_matches, exc_message
+.export op_add, op_sub, op_mul, op_div, op_mod, op_neg, op_not
+.export op_eq, op_neq, op_lt, op_le, op_gt, op_ge, op_match, op_nmatch
+.export index_get, index_set, attr_get, attr_set
+.export send_msg, call_val, invoke_tool_with_caps, builtin_call, build_caps_map
+.export env_new, env_def, env_set, env_get, has_builtin
+
+; ---- Core structs ----
+
+.struct AilInt
+    v: i64
+.ends
+
+.struct AilFloat
+    v: f64
+.ends
+
+.struct AilBool
+    v: i64
+.ends
+
+.struct AilSym
+    name: ref
+.ends
+
+.struct AilDur
+    ms: i64
+.ends
+
+.struct AilRange
+    start: i64
+    stop: i64
+    excl: i64
+.ends
+
+.struct AilRegex
+    pattern: ref
+    flags: ref
+.ends
+
+.struct AilClosure
+    fn: ref
+.ends
+
+.struct AilClass
+    name: ref
+    parent: ref
+    methods: ref
+.ends
+
+.struct AilObj
+    klass: ref
+    fields: ref
+.ends
+
+.struct AilCell
+    val: ref
+.ends
+
+.struct AilExc
+    klass: ref
+    message: ref
+    data: ref
+.ends
+
+.struct AilSchema
+    name: ref
+    fields: ref       ; list of [name, type_str, default_val_or_null, required_int]
+    json_schema: ref
+.ends
+
+.struct AilTool
+    name: ref
+    doc: ref
+    schema_json: ref
+    param_names: ref  ; list of param names in order
+    param_defs: ref   ; map of name -> default AilVal (if optional)
+    fn: ref           ; closure(self, args_list, block) -> ref
+    caps: ref         ; cap.restrict grants map or null
+.ends
+
+.struct AilGuard
+    name: ref
+    on_input: ref     ; closure or null
+    on_output: ref    ; closure or null
+    on_tool: ref      ; closure or null
+    caps: ref         ; grants map or null
+.ends
+
+.struct AilGuardResult
+    verdict: ref      ; "allow", "reject", "redact", "escalate"
+    reason: ref
+    value: ref
+.ends
+
+.struct AilBudget
+    opts: ref
+    timeout_ms: i64
+.ends
+
+.struct AilContext
+    db_name: ref
+    events: ref       ; append-only list of maps
+    views: ref        ; map: view_name -> closure
+.ends
+
+; ---- Module globals ----
+
+inited:   .i64 0
+bool_t:   .zero 8
+bool_f:   .zero 8
+
+.func init
+    bnz @inited, 1f
+    new R0, AilBool
+    mov R0->AilBool.v, 1
+    mov @bool_t, R0
+    new R1, AilBool
+    mov R1->AilBool.v, 0
+    mov @bool_f, R1
+    mov @inited, 1
+1:  ret
+.endf
+
+; ---- Constructors ----
+
+.func mk_int(i64 v) -> ref
+    new R0, AilInt
+    mov R0->AilInt.v, v
+    ret R0
+.endf
+
+.func mk_float(f64 v) -> ref
+    new R0, AilFloat
+    mov R0->AilFloat.v, v
+    ret R0
+.endf
+
+.func mk_bool(i64 v) -> ref
+    bnz @inited, 1f
+    call init ()
+1:  bz v, 2f
+    mov R0, @bool_t
+    ret R0
+2:  mov R0, @bool_f
+    ret R0
+.endf
+
+.func mk_sym(ref name) -> ref
+    ncall "text.intern" (name) -> (R1)
+    new R2, AilSym
+    mov R2->AilSym.name, R1
+    ret R2
+.endf
+
+.func mk_dur(i64 ms) -> ref
+    new R0, AilDur
+    mov R0->AilDur.ms, ms
+    ret R0
+.endf
+
+.func mk_range(i64 start, i64 stop, i64 excl) -> ref
+    new R0, AilRange
+    mov R0->AilRange.start, start
+    mov R0->AilRange.stop, stop
+    mov R0->AilRange.excl, excl
+    ret R0
+.endf
+
+.func mk_regex(ref pat, ref flags) -> ref
+    new R2, AilRegex
+    mov R2->AilRegex.pattern, pat
+    mov R2->AilRegex.flags, flags
+    ret R2
+.endf
+
+.func mk_closure(ref fn) -> ref
+    new R1, AilClosure
+    mov R1->AilClosure.fn, fn
+    ret R1
+.endf
+
+.func mk_cell(ref v) -> ref
+    new R1, AilCell
+    mov R1->AilCell.val, v
+    ret R1
+.endf
+
+.func cell_get(ref c) -> ref
+    mov R1, c->AilCell.val
+    ret R1
+.endf
+
+.func cell_set(ref c, ref v)
+    mov c->AilCell.val, v
+    ret
+.endf
+
+.func mk_exc(ref klass, ref msg) -> ref
+    new R2, AilExc
+    mov R2->AilExc.klass, klass
+    mov R2->AilExc.message, msg
+    mov R2->AilExc.data, null
+    ret R2
+.endf
+
+.func mk_class(ref name, ref parent) -> ref
+    new R2, AilClass
+    mov R2->AilClass.name, name
+    mov R2->AilClass.parent, parent
+    mnew R3
+    mov R2->AilClass.methods, R3
+    ret R2
+.endf
+
+.func class_def_method(ref cls, ref name, ref fn)
+    mov R3, cls->AilClass.methods
+    mset R3, name, fn
+    ret
+.endf
+
+.func mk_obj(ref cls) -> ref
+    new R1, AilObj
+    mov R1->AilObj.klass, cls
+    mnew R2
+    mov R1->AilObj.fields, R2
+    ret R1
+.endf
+
+.func mk_schema(ref name, ref fields, ref json_schema) -> ref
+    new R3, AilSchema
+    mov R3->AilSchema.name, name
+    mov R3->AilSchema.fields, fields
+    mov R3->AilSchema.json_schema, json_schema
+    ret R3
+.endf
+
+.func mk_tool(ref name, ref doc, ref schema_json, ref param_names, ref param_defs, ref fn, ref caps) -> ref
+    new R7, AilTool
+    mov R7->AilTool.name, name
+    mov R7->AilTool.doc, doc
+    mov R7->AilTool.schema_json, schema_json
+    mov R7->AilTool.param_names, param_names
+    mov R7->AilTool.param_defs, param_defs
+    mov R7->AilTool.fn, fn
+    mov R7->AilTool.caps, caps
+    ret R7
+.endf
+
+.func mk_guard(ref name, ref on_in, ref on_out, ref on_tool, ref caps) -> ref
+    new R5, AilGuard
+    mov R5->AilGuard.name, name
+    mov R5->AilGuard.on_input, on_in
+    mov R5->AilGuard.on_output, on_out
+    mov R5->AilGuard.on_tool, on_tool
+    mov R5->AilGuard.caps, caps
+    ret R5
+.endf
+
+.func mk_context(ref db_name) -> ref
+    new R1, AilContext
+    mov R1->AilContext.db_name, db_name
+    lnew R2
+    mov R1->AilContext.events, R2
+    mnew R3
+    mov R1->AilContext.views, R3
+    ret R1
+.endf
+
+; ---- Conversions & Exceptions ----
+
+.func is_truthy(ref v) -> i64
+    bz.r v, falsy
+    bnisa v, AilBool, truthy
+    mov I0, v->AilBool.v
+    ret I0
+truthy:
+    ret 1
+falsy:
+    ret 0
+.endf
+
+.func to_i64(ref v) -> i64
+    bz.r v, zero
+    bisa v, AilInt, is_i
+    bisa v, AilFloat, is_f
+    bisa v, AilDur, is_d
+    typeof I0, v
+    beq I0, 1, is_s
+    ret 0
+is_i:
+    mov I1, v->AilInt.v
+    ret I1
+is_f:
+    cvt.i64.f64 I1, v->AilFloat.v
+    ret I1
+is_d:
+    mov I1, v->AilDur.ms
+    ret I1
+is_s:
+    parse.i64 I1, v
+    ret I1
+zero:
+    ret 0
+.endf
+
+.func to_f64(ref v) -> f64
+    bz.r v, zero
+    bisa v, AilFloat, is_f
+    bisa v, AilInt, is_i
+    typeof I0, v
+    beq I0, 9, is_dec
+    beq I0, 1, is_s
+    ret 0.0
+is_f:
+    mov F0, v->AilFloat.v
+    ret F0
+is_i:
+    cvt.f64.i64 F0, v->AilInt.v
+    ret F0
+is_dec:
+    cvt.f64.dec F0, v
+    ret F0
+is_s:
+    parse.f64 F0, v
+    ret F0
+zero:
+    ret 0.0
+.endf
+
+.func to_str(ref v) -> ref
+    bz.r v, is_nil
+    typeof I0, v
+    beq I0, 1, is_str
+    beq I0, 9, is_dec
+    beq I0, 5, is_list
+    beq I0, 6, is_map
+    bisa v, AilInt, is_int
+    bisa v, AilFloat, is_flt
+    bisa v, AilBool, is_bool
+    bisa v, AilSym, is_sym
+    bisa v, AilDur, is_dur
+    bisa v, AilRange, is_rng
+    bisa v, AilClass, is_cls
+    bisa v, AilSchema, is_sch
+    bisa v, AilTool, is_tool
+    bisa v, AilGuard, is_grd
+    bisa v, AilGuardResult, is_gres
+    bisa v, AilExc, is_exc
+    bisa v, AilObj, is_obj
+    bisa v, Error, is_err
+    tostr R1, v
+    ret R1
+is_nil:
+    ret ""
+is_str:
+    ret v
+is_dec:
+    tostr R1, v
+    ret R1
+is_int:
+    tostr R1, v->AilInt.v
+    ret R1
+is_flt:
+    tostr R1, v->AilFloat.v
+    ret R1
+is_bool:
+    mov I1, v->AilBool.v
+    bz I1, b_f
+    ret "true"
+b_f:
+    ret "false"
+is_sym:
+    ret v->AilSym.name
+is_dur:
+    tostr R1, v->AilDur.ms
+    strcat R2, R1, "ms"
+    ret R2
+is_rng:
+    tostr R1, v->AilRange.start
+    tostr R2, v->AilRange.stop
+    mov I1, v->AilRange.excl
+    bnz I1, r_ex
+    strcat R3, R1, "..", R2
+    ret R3
+r_ex:
+    strcat R3, R1, "...", R2
+    ret R3
+is_cls:
+    ret v->AilClass.name
+is_sch:
+    ret v->AilSchema.name
+is_tool:
+    strcat R1, "#<Tool :", v->AilTool.name, ">"
+    ret R1
+is_grd:
+    strcat R1, "#<Guard ", v->AilGuard.name, ">"
+    ret R1
+is_gres:
+    strcat R1, "#<GuardResult ", v->AilGuardResult.verdict, ">"
+    ret R1
+is_exc:
+    strcat R1, v->AilExc.klass, ": ", v->AilExc.message
+    ret R1
+is_err:
+    strcat R1, v->Error.code, ": ", v->Error.message
+    ret R1
+is_obj:
+    call unwrap_json (v) -> (R1)
+    ncall "json.stringify" (R1, 0) -> (R2)
+    ret R2
+is_list:
+    bufnew R1, 0
+    bufcat R1, "["
+    len I1, v
+    mov I2, 0
+l_loop:
+    bge I2, I1, l_end
+    bz I2, l_no_c
+    bufcat R1, ", "
+l_no_c:
+    mov R2, v[I2]
+    call to_str (R2) -> (R3)
+    bufcat R1, R3
+    inc I2
+    jmp l_loop
+l_end:
+    bufcat R1, "]"
+    strcat R4, R1
+    ret R4
+is_map:
+    call unwrap_json (v) -> (R1)
+    ncall "json.stringify" (R1, 0) -> (R2)
+    ret R2
+.endf
+
+.func exc_message(ref e) -> ref
+    bz.r e, 1f
+    bisa e, AilExc, 2f
+    bisa e, Error, 3f
+    call to_str (e) -> (R1)
+    ret R1
+1:  ret "unknown error"
+2:  ret e->AilExc.message
+3:  ret e->Error.message
+.endf
+
+.func exc_matches(ref e, ref cls_name) -> i64
+    bz.r cls_name, yes
+    strcmp I0, cls_name, "StandardError"
+    bz I0, yes
+    strcmp I0, cls_name, "Exception"
+    bz I0, yes
+    bisa e, AilExc, is_ail
+    bisa e, Error, is_vm
+    ret 0
+is_ail:
+    strcmp I0, e->AilExc.klass, cls_name
+    seq I0, I0, 0
+    ret I0
+is_vm:
+    strcmp I0, e->Error.code, cls_name
+    bz I0, yes
+    strcmp I0, e->Error.code, "E_PERMISSION"
+    bnz I0, chk_q
+    strcmp I0, cls_name, "PermissionError"
+    seq I0, I0, 0
+    ret I0
+chk_q:
+    strcmp I0, e->Error.code, "E_QUOTA"
+    bnz I0, no
+    strcmp I0, cls_name, "BudgetExceeded"
+    seq I0, I0, 0
+    ret I0
+yes:
+    ret 1
+no:
+    ret 0
+.endf
+
+; Convert AIL value -> native MLWSVM value for json.stringify
+.func unwrap_json(ref v) -> ref
+    bz.r v, is_null
+    bisa v, AilInt, u_int
+    bisa v, AilFloat, u_flt
+    bisa v, AilBool, u_bool
+    bisa v, AilSym, u_sym
+    bisa v, AilDur, u_dur
+    bisa v, AilObj, u_obj
+    typeof I0, v
+    beq I0, 1, u_same
+    beq I0, 9, u_same
+    beq I0, 5, u_list
+    beq I0, 6, u_map
+    call to_str (v) -> (R1)
+    ret R1
+is_null:
+    ret null
+u_same:
+    ret v
+u_int:
+    ; Wrap inside helper? No, return boxed unless inside list/map; callers use unwrap_into!
+    ; When top-level, json.stringify accepts list/map/string/dec/null; wrap scalar in string if top-level:
+    tostr R1, v->AilInt.v
+    ret R1
+u_flt:
+    tostr R1, v->AilFloat.v
+    ret R1
+u_bool:
+    mov I1, v->AilBool.v
+    bz I1, ub_f
+    ret "true"
+ub_f:
+    ret "false"
+u_sym:
+    ret v->AilSym.name
+u_dur:
+    tostr R1, v->AilDur.ms
+    ret R1
+u_obj:
+    mov R1, v->AilObj.fields
+    call unwrap_json (R1) -> (R2)
+    ret R2
+u_list:
+    lnew R1
+    len I1, v
+    mov I2, 0
+ul_loop:
+    bge I2, I1, ul_done
+    mov R2, v[I2]
+    bisa R2, AilInt, ul_i
+    bisa R2, AilFloat, ul_f
+    bisa R2, AilBool, ul_b
+    call unwrap_json (R2) -> (R3)
+    lpush R1, R3
+    jmp ul_next
+ul_i:
+    mov I3, R2->AilInt.v
+    lpush R1, I3
+    jmp ul_next
+ul_f:
+    mov F0, R2->AilFloat.v
+    lpush R1, F0
+    jmp ul_next
+ul_b:
+    mov I3, R2->AilBool.v
+    bnz I3, ul_bt
+    lpush R1, false
+    jmp ul_next
+ul_bt:
+    lpush R1, true
+ul_next:
+    inc I2
+    jmp ul_loop
+ul_done:
+    ret R1
+u_map:
+    mnew R1
+    mkeys R2, v
+    len I1, R2
+    mov I2, 0
+um_loop:
+    bge I2, I1, um_done
+    mov R3, R2[I2]
+    mget.r R4, v, R3, null
+    call to_str (R3) -> (R5)
+    bisa R4, AilInt, um_i
+    bisa R4, AilFloat, um_f
+    bisa R4, AilBool, um_b
+    call unwrap_json (R4) -> (R6)
+    mset R1, R5, R6
+    jmp um_next
+um_i:
+    mov I3, R4->AilInt.v
+    mset R1, R5, I3
+    jmp um_next
+um_f:
+    mov F0, R4->AilFloat.v
+    mset R1, R5, F0
+    jmp um_next
+um_b:
+    mov I3, R4->AilBool.v
+    bnz I3, um_bt
+    mset R1, R5, false
+    jmp um_next
+um_bt:
+    mset R1, R5, true
+um_next:
+    inc I2
+    jmp um_loop
+um_done:
+    ret R1
+.endf
+
+; Convert parsed MLWSVM JSON value -> AIL value
+.func wrap_json(ref v) -> ref
+    bz.r v, w_null
+    typeof I0, v
+    beq I0, 1, w_same
+    beq I0, 9, w_same
+    beq I0, 5, w_list
+    beq I0, 6, w_map
+    ret v
+w_null:
+    ret null
+w_same:
+    ret v
+w_list:
+    lnew R1
+    len I1, v
+    mov I2, 0
+wl_loop:
+    bge I2, I1, wl_done
+    tagof I3, v[I2]
+    beq I3, 1, wl_b                   ; bool
+    beq I3, 6, wl_i                   ; i64
+    beq I3, 12, wl_f                  ; f64
+    mov R2, v[I2]
+    call wrap_json (R2) -> (R3)
+    lpush R1, R3
+    jmp wl_next
+wl_b:
+    mov I4, v[I2]
+    call mk_bool (I4) -> (R3)
+    lpush R1, R3
+    jmp wl_next
+wl_i:
+    mov I4, v[I2]
+    call mk_int (I4) -> (R3)
+    lpush R1, R3
+    jmp wl_next
+wl_f:
+    mov F0, v[I2]
+    call mk_float (F0) -> (R3)
+    lpush R1, R3
+wl_next:
+    inc I2
+    jmp wl_loop
+wl_done:
+    ret R1
+w_map:
+    mnew R1
+    mkeys R2, v
+    len I1, R2
+    mov I2, 0
+wm_loop:
+    bge I2, I1, wm_done
+    mov R3, R2[I2]
+    ; Extract value via json.stringify/parse_any or try typed mget:
+.try wm_try_int
+    mget.r R4, v, R3, null
+    call wrap_json (R4) -> (R5)
+    mset R1, R3, R5
+    jmp wm_next
+.endtry
+wm_try_int:
+    catch R9
+.try wm_try_flt
+    mget I4, v, R3, 0
+    ; Distinguish bool vs i64 by re-checking with json? Actually mget.b / i64:
+    ; Put into 1-elem list? Wait: mget on bool into I reg works in MLWSVM; check via json:
+    call mk_int (I4) -> (R5)
+    mset R1, R3, R5
+    jmp wm_next
+.endtry
+wm_try_flt:
+    catch R9
+    mget F0, v, R3, 0.0
+    call mk_float (F0) -> (R5)
+    mset R1, R3, R5
+wm_next:
+    inc I2
+    jmp wm_loop
+wm_done:
+    ret R1
+.endf
+
+; ---- Operators ----
+
+.func op_add(ref a, ref b) -> ref
+    bisa a, AilInt, a_int
+    bisa a, AilFloat, a_flt
+    typeof I0, a
+    beq I0, 1, a_str
+    beq I0, 9, a_dec
+    beq I0, 5, a_list
+    call mk_exc ("TypeError", "unsupported '+' operands") -> (R2)
+    throw R2
+a_int:
+    bisa b, AilInt, ai_bi
+    bisa b, AilFloat, ai_bf
+    typeof I1, b
+    beq I1, 9, a_dec
+    call mk_exc ("TypeError", "cannot add non-number to Int") -> (R2)
+    throw R2
+ai_bi:
+    add I2, a->AilInt.v, b->AilInt.v
+    call mk_int (I2) -> (R2)
+    ret R2
+ai_bf:
+    cvt.f64.i64 F0, a->AilInt.v
+    add F0, F0, b->AilFloat.v
+    call mk_float (F0) -> (R2)
+    ret R2
+a_flt:
+    call to_f64 (b) -> (F1)
+    add F0, a->AilFloat.v, F1
+    call mk_float (F0) -> (R2)
+    ret R2
+a_dec:
+    bisa a, AilInt, d_ai
+    mov R3, a
+    jmp d_b
+d_ai:
+    cvt.dec.i64 R3, a->AilInt.v
+d_b:
+    bisa b, AilInt, d_bi
+    mov R4, b
+    jmp d_go
+d_bi:
+    cvt.dec.i64 R4, b->AilInt.v
+d_go:
+    add.dec R5, R3, R4
+    ret R5
+a_str:
+    call to_str (b) -> (R2)
+    strcat R3, a, R2
+    ret R3
+a_list:
+    lnew R2
+    len I1, a
+    mov I2, 0
+al1:
+    bge I2, I1, al2_init
+    mov R3, a[I2]
+    lpush R2, R3
+    inc I2
+    jmp al1
+al2_init:
+    len I1, b
+    mov I2, 0
+al2:
+    bge I2, I1, al_done
+    mov R3, b[I2]
+    lpush R2, R3
+    inc I2
+    jmp al2
+al_done:
+    ret R2
+.endf
+
+.func op_sub(ref a, ref b) -> ref
+    bisa a, AilInt, s_int
+    typeof I0, a
+    beq I0, 9, s_dec
+    call to_f64 (a) -> (F0)
+    call to_f64 (b) -> (F1)
+    sub F2, F0, F1
+    call mk_float (F2) -> (R2)
+    ret R2
+s_int:
+    bnisa b, AilInt, s_flt
+    sub I1, a->AilInt.v, b->AilInt.v
+    call mk_int (I1) -> (R2)
+    ret R2
+s_flt:
+    typeof I0, b
+    beq I0, 9, s_dec
+    call to_f64 (a) -> (F0)
+    call to_f64 (b) -> (F1)
+    sub F2, F0, F1
+    call mk_float (F2) -> (R2)
+    ret R2
+s_dec:
+    bisa a, AilInt, sd_ai
+    mov R3, a
+    jmp sd_b
+sd_ai:
+    cvt.dec.i64 R3, a->AilInt.v
+sd_b:
+    bisa b, AilInt, sd_bi
+    mov R4, b
+    jmp sd_go
+sd_bi:
+    cvt.dec.i64 R4, b->AilInt.v
+sd_go:
+    sub.dec R5, R3, R4
+    ret R5
+.endf
+
+.func op_mul(ref a, ref b) -> ref
+    typeof I0, a
+    beq I0, 1, m_str
+    beq I0, 9, m_dec
+    bisa a, AilInt, m_int
+    call to_f64 (a) -> (F0)
+    call to_f64 (b) -> (F1)
+    mul F2, F0, F1
+    call mk_float (F2) -> (R2)
+    ret R2
+m_str:
+    call to_i64 (b) -> (I1)
+    ncall "text.repeat" (a, I1) -> (R2)
+    ret R2
+m_int:
+    bnisa b, AilInt, m_flt
+    mul I1, a->AilInt.v, b->AilInt.v
+    call mk_int (I1) -> (R2)
+    ret R2
+m_flt:
+    typeof I0, b
+    beq I0, 9, m_dec
+    call to_f64 (a) -> (F0)
+    call to_f64 (b) -> (F1)
+    mul F2, F0, F1
+    call mk_float (F2) -> (R2)
+    ret R2
+m_dec:
+    bisa a, AilInt, md_ai
+    mov R3, a
+    jmp md_b
+md_ai:
+    cvt.dec.i64 R3, a->AilInt.v
+md_b:
+    bisa b, AilInt, md_bi
+    mov R4, b
+    jmp md_go
+md_bi:
+    cvt.dec.i64 R4, b->AilInt.v
+md_go:
+    mul.dec R5, R3, R4
+    ret R5
+.endf
+
+.func op_div(ref a, ref b) -> ref
+    typeof I0, a
+    beq I0, 9, dv_dec
+    bisa a, AilInt, dv_int
+    call to_f64 (a) -> (F0)
+    call to_f64 (b) -> (F1)
+    div F2, F0, F1
+    call mk_float (F2) -> (R2)
+    ret R2
+dv_int:
+    bnisa b, AilInt, dv_flt
+    div I1, a->AilInt.v, b->AilInt.v
+    call mk_int (I1) -> (R2)
+    ret R2
+dv_flt:
+    typeof I0, b
+    beq I0, 9, dv_dec
+    call to_f64 (a) -> (F0)
+    call to_f64 (b) -> (F1)
+    div F2, F0, F1
+    call mk_float (F2) -> (R2)
+    ret R2
+dv_dec:
+    bisa a, AilInt, dd_ai
+    mov R3, a
+    jmp dd_b
+dd_ai:
+    cvt.dec.i64 R3, a->AilInt.v
+dd_b:
+    bisa b, AilInt, dd_bi
+    mov R4, b
+    jmp dd_go
+dd_bi:
+    cvt.dec.i64 R4, b->AilInt.v
+dd_go:
+    div.dec R5, R3, R4
+    ret R5
+.endf
+
+.func op_mod(ref a, ref b) -> ref
+    call to_i64 (a) -> (I0)
+    call to_i64 (b) -> (I1)
+    rem I2, I0, I1
+    call mk_int (I2) -> (R2)
+    ret R2
+.endf
+
+.func op_neg(ref a) -> ref
+    bisa a, AilInt, n_i
+    bisa a, AilFloat, n_f
+    typeof I0, a
+    beq I0, 9, n_d
+    ret a
+n_i:
+    neg I1, a->AilInt.v
+    call mk_int (I1) -> (R1)
+    ret R1
+n_f:
+    neg F0, a->AilFloat.v
+    call mk_float (F0) -> (R1)
+    ret R1
+n_d:
+    neg.dec R1, a
+    ret R1
+.endf
+
+.func op_not(ref a) -> ref
+    call is_truthy (a) -> (I0)
+    seq I1, I0, 0
+    call mk_bool (I1) -> (R1)
+    ret R1
+.endf
+
+.func eq_raw(ref a, ref b) -> i64
+    beq.r a, b, eq_yes
+    bz.r a, eq_no
+    bz.r b, eq_no
+    bisa a, AilInt, e_int
+    bisa a, AilFloat, e_flt
+    bisa a, AilBool, e_bool
+    bisa a, AilSym, e_sym
+    typeof I0, a
+    typeof I1, b
+    bne I0, I1, eq_no
+    beq I0, 1, e_str
+    beq I0, 9, e_dec
+    ret 0
+e_int:
+    bisa b, AilInt, ei_bi
+    bisa b, AilFloat, ei_bf
+    ret 0
+ei_bi:
+    seq I2, a->AilInt.v, b->AilInt.v
+    ret I2
+ei_bf:
+    cvt.f64.i64 F0, a->AilInt.v
+    seq.f64 I2, F0, b->AilFloat.v
+    ret I2
+e_flt:
+    call to_f64 (b) -> (F1)
+    seq.f64 I2, a->AilFloat.v, F1
+    ret I2
+e_bool:
+    bnisa b, AilBool, eq_no
+    seq I2, a->AilBool.v, b->AilBool.v
+    ret I2
+e_sym:
+    bnisa b, AilSym, eq_no
+    seq.r I2, a->AilSym.name, b->AilSym.name
+    ret I2
+e_str:
+    strcmp I2, a, b
+    seq I2, I2, 0
+    ret I2
+e_dec:
+    seq.dec I2, a, b
+    ret I2
+eq_yes:
+    ret 1
+eq_no:
+    ret 0
+.endf
+
+.func op_eq(ref a, ref b) -> ref
+    call eq_raw (a, b) -> (I0)
+    call mk_bool (I0) -> (R2)
+    ret R2
+.endf
+
+.func op_neq(ref a, ref b) -> ref
+    call eq_raw (a, b) -> (I0)
+    seq I1, I0, 0
+    call mk_bool (I1) -> (R2)
+    ret R2
+.endf
+
+.func cmp_raw(ref a, ref b) -> i64
+    bisa a, AilInt, c_int
+    typeof I0, a
+    beq I0, 1, c_str
+    beq I0, 9, c_dec
+    call to_f64 (a) -> (F0)
+    call to_f64 (b) -> (F1)
+    blt F0, F1, c_lt
+    bgt F0, F1, c_gt
+    ret 0
+c_int:
+    bnisa b, AilInt, c_flt
+    blt a->AilInt.v, b->AilInt.v, c_lt
+    bgt a->AilInt.v, b->AilInt.v, c_gt
+    ret 0
+c_flt:
+    call to_f64 (a) -> (F0)
+    call to_f64 (b) -> (F1)
+    blt F0, F1, c_lt
+    bgt F0, F1, c_gt
+    ret 0
+c_str:
+    strcmp I1, a, b
+    ret I1
+c_dec:
+    blt.dec a, b, c_lt
+    bgt.dec a, b, c_gt
+    ret 0
+c_lt:
+    ret -1
+c_gt:
+    ret 1
+.endf
+
+.func op_lt(ref a, ref b) -> ref
+    call cmp_raw (a, b) -> (I0)
+    slt I1, I0, 0
+    call mk_bool (I1) -> (R2)
+    ret R2
+.endf
+
+.func op_le(ref a, ref b) -> ref
+    call cmp_raw (a, b) -> (I0)
+    sle I1, I0, 0
+    call mk_bool (I1) -> (R2)
+    ret R2
+.endf
+
+.func op_gt(ref a, ref b) -> ref
+    call cmp_raw (a, b) -> (I0)
+    sgt I1, I0, 0
+    call mk_bool (I1) -> (R2)
+    ret R2
+.endf
+
+.func op_ge(ref a, ref b) -> ref
+    call cmp_raw (a, b) -> (I0)
+    sge I1, I0, 0
+    call mk_bool (I1) -> (R2)
+    ret R2
+.endf
+
+.func op_match(ref a, ref b) -> ref
+    call to_str (a) -> (R2)
+    bisa b, AilRegex, m_re
+    call to_str (b) -> (R3)
+    ncall "regex.compile" (R3, "") -> (R4)
+    jmp m_go
+m_re:
+    ncall "regex.compile" (b->AilRegex.pattern, b->AilRegex.flags) -> (R4)
+m_go:
+    ncall "regex.test" (R4, R2) -> (I0)
+    call mk_bool (I0) -> (R5)
+    ret R5
+.endf
+
+.func op_nmatch(ref a, ref b) -> ref
+    call op_match (a, b) -> (R2)
+    call op_not (R2) -> (R3)
+    ret R3
+.endf
+
+; ---- Indexing & attributes ----
+
+.func index_get(ref obj, ref idx) -> ref
+    bz.r obj, ret_nil
+    typeof I0, obj
+    beq I0, 5, ig_list
+    beq I0, 6, ig_map
+    beq I0, 1, ig_str
+    bisa obj, AilObj, ig_obj
+    ret null
+ig_list:
+    call to_i64 (idx) -> (I1)
+    len I2, obj
+    bge I1, 0, ig_pos
+    add I1, I1, I2
+ig_pos:
+    blt I1, 0, ret_nil
+    bge I1, I2, ret_nil
+    mov R2, obj[I1]
+    ret R2
+ig_map:
+    call to_str (idx) -> (R2)
+    mget.r R3, obj, R2, null
+    ret R3
+ig_obj:
+    call to_str (idx) -> (R2)
+    mget.r R3, obj->AilObj.fields, R2, null
+    ret R3
+ig_str:
+    call to_i64 (idx) -> (I1)
+    len I2, obj
+    bge I1, 0, is_pos
+    add I1, I1, I2
+is_pos:
+    blt I1, 0, ret_nil
+    bge I1, I2, ret_nil
+    substr R2, obj, I1, 1
+    ret R2
+ret_nil:
+    ret null
+.endf
+
+.func index_set(ref obj, ref idx, ref val) -> ref
+    typeof I0, obj
+    beq I0, 5, iset_list
+    beq I0, 6, iset_map
+    bisa obj, AilObj, iset_obj
+    ret val
+iset_list:
+    call to_i64 (idx) -> (I1)
+    mov obj[I1], val
+    ret val
+iset_map:
+    call to_str (idx) -> (R3)
+    mset obj, R3, val
+    ret val
+iset_obj:
+    call to_str (idx) -> (R3)
+    mset obj->AilObj.fields, R3, val
+    ret val
+.endf
+
+.func attr_get(ref obj, ref name) -> ref
+    bz.r obj, ag_nil
+    bisa obj, AilObj, ag_obj
+    typeof I0, obj
+    beq I0, 6, ag_map
+    ret null
+ag_obj:
+    mget.r R2, obj->AilObj.fields, name, null
+    ret R2
+ag_map:
+    mget.r R2, obj, name, null
+    ret R2
+ag_nil:
+    ret null
+.endf
+
+.func attr_set(ref obj, ref name, ref val) -> ref
+    bisa obj, AilObj, as_obj
+    typeof I0, obj
+    beq I0, 6, as_map
+    ret val
+as_obj:
+    mset obj->AilObj.fields, name, val
+    ret val
+as_map:
+    mset obj, name, val
+    ret val
+.endf
+
+; ---- Capability builder helper ----
+
+; build_caps_map(kv_map) -> cap.restrict grants map (or null if empty)
+; Recognizes fs: read_only(p)/read_write(p)/:none, net: [hosts]/:none, run: [cmds]/:none, env: [vars]/:none
+.func build_caps_map(ref kv) -> ref
+    bz.r kv, bc_null
+    mkeys R1, kv
+    len I0, R1
+    bz I0, bc_null
+    mnew R2                           ; grants map
+    ; fs
+    mhas I1, kv, "fs"
+    bz I1, bc_net
+    mget.r R3, kv, "fs", null
+    bz.r R3, bc_net
+    bisa R3, AilSym, bc_net           ; :none -> no fs grants
+    typeof I2, R3
+    bne I2, 6, bc_net                 ; map {"mode": "ro"|"rw", "path": "..."}
+    mget.r R4, R3, "mode", ""
+    mget.r R5, R3, "path", ""
+    lnew R6
+    lpush R6, R5
+    mset R2, "read", R6
+    strcmp I3, R4, "rw"
+    bnz I3, bc_net
+    lnew R7
+    lpush R7, R5
+    mset R2, "write", R7
+bc_net:
+    mhas I1, kv, "net"
+    bz I1, bc_run
+    mget.r R3, kv, "net", null
+    bz.r R3, bc_run
+    bisa R3, AilSym, bc_run           ; :none
+    typeof I2, R3
+    bne I2, 5, bc_run                 ; list of host:port strings
+    mset R2, "connect", R3
+bc_run:
+    mhas I1, kv, "run"
+    bz I1, bc_env
+    mget.r R3, kv, "run", null
+    bz.r R3, bc_env
+    bisa R3, AilSym, bc_env
+    typeof I2, R3
+    bne I2, 5, bc_env
+    mset R2, "run", R3
+bc_env:
+    mhas I1, kv, "env"
+    bz I1, bc_done
+    mget.r R3, kv, "env", null
+    bz.r R3, bc_done
+    bisa R3, AilSym, bc_done
+    typeof I2, R3
+    bne I2, 5, bc_done
+    mset R2, "env", R3
+bc_done:
+    ret R2
+bc_null:
+    ret null
+.endf
+
+; ---- Tool invocation ----
+
+; invoke_tool_with_caps(tool, args_or_map, effective_caps) -> ref
+.func invoke_tool_with_caps(ref tool, ref arg_in, ref caps) -> ref
+    ; Convert map of named args -> positional args list using tool.param_names + param_defs
+    typeof I0, arg_in
+    beq I0, 5, have_list
+    lnew R3                           ; positional args list
+    mov R4, tool->AilTool.param_names
+    mov R5, tool->AilTool.param_defs
+    len I1, R4
+    mov I2, 0
+map_loop:
+    bge I2, I1, map_done
+    mov R6, R4[I2]
+    bz.r arg_in, use_def
+    mhas I3, arg_in, R6
+    bz I3, use_def
+    mget.r R7, arg_in, R6, null
+    lpush R3, R7
+    jmp map_next
+use_def:
+    bz.r R5, push_nil
+    mhas I4, R5, R6
+    bz I4, push_nil
+    mget.r R7, R5, R6, null
+    lpush R3, R7
+    jmp map_next
+push_nil:
+    mov R7, null
+    lpush R3, R7
+map_next:
+    inc I2
+    jmp map_loop
+map_done:
+    jmp run_it
+have_list:
+    mov R3, arg_in
+run_it:
+    mov R8, tool->AilTool.fn
+    bz.r caps, run_direct
+    call sandbox.run_sandboxed (caps, R8, tool, R3, null) -> (R9)
+    ret R9
+run_direct:
+    calli R8 (tool, R3, null) -> (R9)
+    ret R9
+.endf
+
+; ---- Calling closures / tools ----
+
+.func call_val(ref fn, ref args, ref block) -> ref
+    bz.r fn, cv_err
+    bisa fn, AilClosure, cv_clos
+    bisa fn, AilTool, cv_tool
+    typeof I0, fn
+    beq I0, 7, cv_raw
+cv_err:
+    call mk_exc ("TypeError", "object is not callable") -> (R3)
+    throw R3
+cv_clos:
+    mov R3, fn->AilClosure.fn
+    calli R3 (null, args, block) -> (R4)
+    ret R4
+cv_raw:
+    calli fn (null, args, block) -> (R4)
+    ret R4
+cv_tool:
+    call invoke_tool_with_caps (fn, args, fn->AilTool.caps) -> (R4)
+    ret R4
+.endf
+
+; ---- Recursive file glob helper (simple suffix/contains match) ----
+
+.func walk_dir(ref dir, ref out_list)
+.try wd_err
+    ncall "fs.list" (dir) -> (R2)
+.endtry
+    len I0, R2
+    mov I1, 0
+wd_loop:
+    bge I1, I0, wd_done
+    mov R3, R2[I1]
+    inc I1
+    ; Skip .git and build dirs
+    strcmp I2, R3, ".git"
+    bz I2, wd_loop
+    ncall "path.join" (dir, R3) -> (R4)
+.try wd_loop
+    ncall "fs.stat" (R4) -> (R5)
+.endtry
+    mov I3, R5->FileInfo.kind
+    beq I3, 2, wd_sub
+    beq I3, 1, wd_file
+    jmp wd_loop
+wd_sub:
+    call walk_dir (R4, out_list)
+    jmp wd_loop
+wd_file:
+    lpush out_list, R4
+    jmp wd_loop
+wd_err:
+    catch R9
+wd_done:
+    ret
+.endf
+
+; ---- Method dispatch: send_msg(recv, name, args, block) -> ref ----
+
+.func send_msg(ref recv, ref name, ref args, ref block) -> ref
+    ; Universal methods
+    strcmp I0, name, "to_s"
+    bnz I0, chk_nil
+    call to_str (recv) -> (R4)
+    ret R4
+chk_nil:
+    strcmp I0, name, "nil?"
+    bnz I0, chk_dispatch
+    seq.r I1, recv, null
+    call mk_bool (I1) -> (R4)
+    ret R4
+
+chk_dispatch:
+    bz.r recv, no_method
+    bisa recv, AilObj, m_obj
+    bisa recv, AilClass, m_class
+    bisa recv, AilSchema, m_schema
+    bisa recv, AilTool, m_tool
+    bisa recv, AilGuard, m_guard
+    bisa recv, AilGuardResult, m_gres
+    bisa recv, AilContext, m_ctx
+    bisa recv, AilInt, m_int
+    bisa recv, AilFloat, m_flt
+    bisa recv, AilSym, m_sym
+    bisa recv, AilDur, m_dur
+    bisa recv, AilRange, m_range
+    bisa recv, AilClosure, m_closure
+    bisa recv, AilExc, m_exc
+    typeof I0, recv
+    beq I0, 1, m_str
+    beq I0, 5, m_list
+    beq I0, 6, m_map
+    beq I0, 9, m_dec
+    jmp no_method
+
+; -- User class instance --
+m_obj:
+    mov R4, recv->AilObj.klass
+mo_walk:
+    bz.r R4, mo_field
+    mov R5, R4->AilClass.methods
+    mhas I1, R5, name
+    bnz I1, mo_found
+    mov R4, R4->AilClass.parent
+    jmp mo_walk
+mo_found:
+    mget.r R6, R5, name, null
+    calli R6 (recv, args, block) -> (R7)
+    ret R7
+mo_field:
+    ; Schema / struct field accessor fallback
+    mov R5, recv->AilObj.fields
+    mhas I1, R5, name
+    bz I1, no_method
+    mget.r R6, R5, name, null
+    ret R6
+
+; -- Class .new(...) --
+m_class:
+    strcmp I1, name, "new"
+    bnz I1, mc_name
+    call mk_obj (recv) -> (R4)
+    ; Call initialize if present
+    mov R5, recv
+mc_walk:
+    bz.r R5, mc_ret
+    mov R6, R5->AilClass.methods
+    mhas I2, R6, "initialize"
+    bnz I2, mc_init
+    mov R5, R5->AilClass.parent
+    jmp mc_walk
+mc_init:
+    mget.r R7, R6, "initialize", null
+    calli R7 (R4, args, block) -> (R8)
+mc_ret:
+    ret R4
+mc_name:
+    strcmp I1, name, "name"
+    bnz I1, no_method
+    ret recv->AilClass.name
+
+; -- Schema .new(hash) / .json_schema / .validate / .name --
+m_schema:
+    strcmp I1, name, "json_schema"
+    bnz I1, ms_name
+    ret recv->AilSchema.json_schema
+ms_name:
+    strcmp I1, name, "name"
+    bnz I1, ms_new
+    ret recv->AilSchema.name
+ms_new:
+    strcmp I1, name, "new"
+    bnz I1, ms_val
+    call mk_obj (null) -> (R4)
+    mov R5, null
+    len I2, args
+    bz I2, ms_fill
+    mov R5, args[0]                   ; input hash
+ms_fill:
+    mov R6, recv->AilSchema.fields
+    len I3, R6
+    mov I4, 0
+ms_floop:
+    bge I4, I3, ms_done
+    mov R7, R6[I4]                    ; [fname, ftype, default_val, req_int]
+    mov R8, R7[0]
+    mov R9, R7[2]
+    mov I5, R7[3]
+    bz.r R5, ms_use_def
+    mhas I6, R5, R8
+    bz I6, ms_use_def
+    mget.r R10, R5, R8, null
+    mset R4->AilObj.fields, R8, R10
+    jmp ms_next
+ms_use_def:
+    bnz.r R9, ms_set_def
+    bz I5, ms_set_nil
+    strcat R11, "schema ", recv->AilSchema.name, " missing required field '", R8, "'"
+    call mk_exc ("SchemaError", R11) -> (R12)
+    throw R12
+ms_set_def:
+    mset R4->AilObj.fields, R8, R9
+    jmp ms_next
+ms_set_nil:
+    mov R10, null
+    mset R4->AilObj.fields, R8, R10
+ms_next:
+    inc I4
+    jmp ms_floop
+ms_done:
+    ret R4
+ms_val:
+    strcmp I1, name, "validate"
+    bnz I1, no_method
+    call send_msg (recv, "new", args, null) -> (R4)
+    ret R4
+
+; -- Tool methods --
+m_tool:
+    strcmp I1, name, "call"
+    bnz I1, mt_schema
+    call invoke_tool_with_caps (recv, args, recv->AilTool.caps) -> (R4)
+    ret R4
+mt_schema:
+    strcmp I1, name, "schema"
+    bnz I1, mt_name
+    ret recv->AilTool.schema_json
+mt_name:
+    strcmp I1, name, "name"
+    bnz I1, mt_doc
+    ret recv->AilTool.name
+mt_doc:
+    strcmp I1, name, "doc"
+    bnz I1, no_method
+    ret recv->AilTool.doc
+
+; -- Guard methods --
+m_guard:
+    strcmp I1, name, "check_input"
+    bnz I1, mg_out
+    mov R4, recv->AilGuard.on_input
+    jmp mg_run
+mg_out:
+    strcmp I1, name, "check_output"
+    bnz I1, mg_tool
+    mov R4, recv->AilGuard.on_output
+    jmp mg_run
+mg_tool:
+    strcmp I1, name, "check_tool"
+    bnz I1, mg_name
+    mov R4, recv->AilGuard.on_tool
+mg_run:
+    bz.r R4, mg_allow
+    calli R4 (recv, args, null) -> (R5)
+    bisa R5, AilGuardResult, mg_ret
+mg_allow:
+    new R5, AilGuardResult
+    mov R5->AilGuardResult.verdict, "allow"
+    mov R5->AilGuardResult.reason, ""
+    mov R5->AilGuardResult.value, null
+mg_ret:
+    ret R5
+mg_name:
+    strcmp I1, name, "name"
+    bnz I1, no_method
+    ret recv->AilGuard.name
+
+; -- GuardResult methods --
+m_gres:
+    strcmp I1, name, "verdict"
+    bnz I1, mgr_r
+    call mk_sym (recv->AilGuardResult.verdict) -> (R4)
+    ret R4
+mgr_r:
+    strcmp I1, name, "reason"
+    bnz I1, mgr_v
+    ret recv->AilGuardResult.reason
+mgr_v:
+    strcmp I1, name, "value"
+    bnz I1, mgr_ok
+    ret recv->AilGuardResult.value
+mgr_ok:
+    strcmp I1, name, "allowed?"
+    bnz I1, mgr_rej
+    strcmp I2, recv->AilGuardResult.verdict, "allow"
+    seq I2, I2, 0
+    call mk_bool (I2) -> (R4)
+    ret R4
+mgr_rej:
+    strcmp I1, name, "rejected?"
+    bnz I1, no_method
+    strcmp I2, recv->AilGuardResult.verdict, "reject"
+    seq I2, I2, 0
+    call mk_bool (I2) -> (R4)
+    ret R4
+
+; -- Context methods (append-only log + named views + checkpoint/rewind) --
+m_ctx:
+    strcmp I1, name, "append"
+    bnz I1, mcx_att
+    mov R4, args[0]                   ; kind
+    mov R5, args[1]                   ; payload
+    mnew R6
+    call to_str (R4) -> (R7)
+    mset R6, "kind", R7
+    mset R6, "payload", R5
+    lpush recv->AilContext.events, R6
+    ret recv
+mcx_att:
+    strcmp I1, name, "attach"
+    bnz I1, mcx_ev
+    call send_msg (recv, "append", args, null) -> (R4)
+    ret R4
+mcx_ev:
+    strcmp I1, name, "events"
+    bnz I1, mcx_cp
+    ret recv->AilContext.events
+mcx_cp:
+    strcmp I1, name, "checkpoint"
+    bnz I1, mcx_rw
+    len I2, recv->AilContext.events
+    call mk_int (I2) -> (R4)
+    ret R4
+mcx_rw:
+    strcmp I1, name, "rewind"
+    bnz I1, mcx_dv
+    call to_i64 (args[0]) -> (I2)
+    lnew R4
+    mov R5, recv->AilContext.events
+    len I3, R5
+    mov I4, 0
+mcx_rwl:
+    bge I4, I2, mcx_rwd
+    bge I4, I3, mcx_rwd
+    mov R6, R5[I4]
+    lpush R4, R6
+    inc I4
+    jmp mcx_rwl
+mcx_rwd:
+    mov recv->AilContext.events, R4
+    ret recv
+mcx_dv:
+    strcmp I1, name, "define_view"
+    bnz I1, mcx_v
+    call to_str (args[0]) -> (R4)
+    mset recv->AilContext.views, R4, block
+    ret recv
+mcx_v:
+    strcmp I1, name, "view"
+    bnz I1, no_method
+    call to_str (args[0]) -> (R4)
+    strcmp I2, R4, "audit"
+    bz I2, mcx_vaudit
+    mhas I2, recv->AilContext.views, R4
+    bz I2, mcx_vaudit
+    mget.r R5, recv->AilContext.views, R4, null
+    lnew R6
+    lpush R6, recv->AilContext.events
+    call call_val (R5, R6, null) -> (R7)
+    ret R7
+mcx_vaudit:
+    ret recv->AilContext.events
+
+; -- Int methods (durations .ms .s .m, .times, .abs, .even?, .odd?) --
+m_int:
+    strcmp I1, name, "ms"
+    bnz I1, mi_s
+    call mk_dur (recv->AilInt.v) -> (R4)
+    ret R4
+mi_s:
+    strcmp I1, name, "s"
+    bnz I1, mi_m
+    mul I2, recv->AilInt.v, 1000
+    call mk_dur (I2) -> (R4)
+    ret R4
+mi_m:
+    strcmp I1, name, "m"
+    bnz I1, mi_times
+    mul I2, recv->AilInt.v, 60000
+    call mk_dur (I2) -> (R4)
+    ret R4
+mi_times:
+    strcmp I1, name, "times"
+    bnz I1, mi_abs
+    mov I2, 0
+    mov I3, recv->AilInt.v
+mi_tl:
+    bge I2, I3, mi_td
+    call mk_int (I2) -> (R4)
+    lnew R5
+    lpush R5, R4
+    call call_val (block, R5, null) -> (R6)
+    inc I2
+    jmp mi_tl
+mi_td:
+    ret recv
+mi_abs:
+    strcmp I1, name, "abs"
+    bnz I1, mi_even
+    abs I2, recv->AilInt.v
+    call mk_int (I2) -> (R4)
+    ret R4
+mi_even:
+    strcmp I1, name, "even?"
+    bnz I1, mi_odd
+    rem I2, recv->AilInt.v, 2
+    seq I2, I2, 0
+    call mk_bool (I2) -> (R4)
+    ret R4
+mi_odd:
+    strcmp I1, name, "odd?"
+    bnz I1, mi_toi
+    rem I2, recv->AilInt.v, 2
+    sne I2, I2, 0
+    call mk_bool (I2) -> (R4)
+    ret R4
+mi_toi:
+    strcmp I1, name, "to_i"
+    bnz I1, mi_tof
+    ret recv
+mi_tof:
+    strcmp I1, name, "to_f"
+    bnz I1, no_method
+    cvt.f64.i64 F0, recv->AilInt.v
+    call mk_float (F0) -> (R4)
+    ret R4
+
+; -- Float methods --
+m_flt:
+    strcmp I1, name, "s"
+    bnz I1, mf_toi
+    mul F0, recv->AilFloat.v, 1000.0
+    cvt.i64.f64 I2, F0
+    call mk_dur (I2) -> (R4)
+    ret R4
+mf_toi:
+    strcmp I1, name, "to_i"
+    bnz I1, mf_tof
+    cvt.i64.f64 I2, recv->AilFloat.v
+    call mk_int (I2) -> (R4)
+    ret R4
+mf_tof:
+    strcmp I1, name, "to_f"
+    bnz I1, no_method
+    ret recv
+
+; -- Symbol methods --
+m_sym:
+    strcmp I1, name, "to_sym"
+    bnz I1, no_method
+    ret recv
+
+; -- Duration methods --
+m_dur:
+    strcmp I1, name, "ms"
+    bnz I1, no_method
+    call mk_int (recv->AilDur.ms) -> (R4)
+    ret R4
+
+; -- Decimal methods --
+m_dec:
+    strcmp I1, name, "round"
+    bnz I1, md_tof
+    mov I2, 0
+    len I3, args
+    bz I3, md_rgo
+    call to_i64 (args[0]) -> (I2)
+md_rgo:
+    ncall "dec.round" (recv, I2, null) -> (R4)
+    ret R4
+md_tof:
+    strcmp I1, name, "to_f"
+    bnz I1, no_method
+    cvt.f64.dec F0, recv
+    call mk_float (F0) -> (R4)
+    ret R4
+
+; -- Closure .call(...) --
+m_closure:
+    strcmp I1, name, "call"
+    bnz I1, no_method
+    call call_val (recv, args, block) -> (R4)
+    ret R4
+
+; -- Exception methods --
+m_exc:
+    strcmp I1, name, "message"
+    bnz I1, me_cls
+    ret recv->AilExc.message
+me_cls:
+    strcmp I1, name, "class_name"
+    bnz I1, no_method
+    ret recv->AilExc.klass
+
+; -- Range methods (.each, .map, .to_a, .include?, .size) --
+m_range:
+    strcmp I1, name, "to_a"
+    bnz I1, mr_each
+    lnew R4
+    mov I2, recv->AilRange.start
+    mov I3, recv->AilRange.stop
+    mov I4, recv->AilRange.excl
+    bnz I4, mr_a_loop
+    inc I3
+mr_a_loop:
+    bge I2, I3, mr_a_done
+    call mk_int (I2) -> (R5)
+    lpush R4, R5
+    inc I2
+    jmp mr_a_loop
+mr_a_done:
+    ret R4
+mr_each:
+    strcmp I1, name, "each"
+    bnz I1, mr_map
+    mov I2, recv->AilRange.start
+    mov I3, recv->AilRange.stop
+    mov I4, recv->AilRange.excl
+    bnz I4, mr_e_loop
+    inc I3
+mr_e_loop:
+    bge I2, I3, mr_e_done
+    call mk_int (I2) -> (R5)
+    lnew R6
+    lpush R6, R5
+    call call_val (block, R6, null) -> (R7)
+    inc I2
+    jmp mr_e_loop
+mr_e_done:
+    ret recv
+mr_map:
+    strcmp I1, name, "map"
+    bnz I1, mr_inc
+    call send_msg (recv, "to_a", args, null) -> (R4)
+    call send_msg (R4, "map", args, block) -> (R5)
+    ret R5
+mr_inc:
+    strcmp I1, name, "include?"
+    bnz I1, no_method
+    call to_i64 (args[0]) -> (I2)
+    blt I2, recv->AilRange.start, mr_no
+    mov I3, recv->AilRange.stop
+    mov I4, recv->AilRange.excl
+    bnz I4, mr_ex
+    bgt I2, I3, mr_no
+    call mk_bool (1) -> (R4)
+    ret R4
+mr_ex:
+    bge I2, I3, mr_no
+    call mk_bool (1) -> (R4)
+    ret R4
+mr_no:
+    call mk_bool (0) -> (R4)
+    ret R4
+
+; -- String methods --
+m_str:
+    strcmp I1, name, "length"
+    bz I1, mstr_len
+    strcmp I1, name, "size"
+    bnz I1, mstr_emp
+mstr_len:
+    ncall "text.length" (recv) -> (I2)
+    call mk_int (I2) -> (R4)
+    ret R4
+mstr_emp:
+    strcmp I1, name, "empty?"
+    bnz I1, mstr_up
+    len I2, recv
+    seq I2, I2, 0
+    call mk_bool (I2) -> (R4)
+    ret R4
+mstr_up:
+    strcmp I1, name, "upcase"
+    bnz I1, mstr_dn
+    ncall "text.upper" (recv) -> (R4)
+    ret R4
+mstr_dn:
+    strcmp I1, name, "downcase"
+    bnz I1, mstr_strip
+    ncall "text.lower" (recv) -> (R4)
+    ret R4
+mstr_strip:
+    strcmp I1, name, "strip"
+    bz I1, mstr_st_do
+    strcmp I1, name, "trim"
+    bnz I1, mstr_split
+mstr_st_do:
+    ncall "text.trim" (recv) -> (R4)
+    ret R4
+mstr_split:
+    strcmp I1, name, "split"
+    bnz I1, mstr_lines
+    mov R4, ""
+    len I2, args
+    bz I2, mstr_sp_go
+    call to_str (args[0]) -> (R4)
+mstr_sp_go:
+    ncall "text.split" (recv, R4) -> (R5)
+    ret R5
+mstr_lines:
+    strcmp I1, name, "lines"
+    bnz I1, mstr_inc
+    ncall "text.lines" (recv) -> (R4)
+    ret R4
+mstr_inc:
+    strcmp I1, name, "include?"
+    bnz I1, mstr_sw
+    call to_str (args[0]) -> (R4)
+    ncall "text.find" (recv, R4, 0) -> (I2)
+    sge I3, I2, 0
+    call mk_bool (I3) -> (R5)
+    ret R5
+mstr_sw:
+    strcmp I1, name, "start_with?"
+    bnz I1, mstr_ew
+    call to_str (args[0]) -> (R4)
+    ncall "text.starts_with" (recv, R4) -> (I2)
+    call mk_bool (I2) -> (R5)
+    ret R5
+mstr_ew:
+    strcmp I1, name, "end_with?"
+    bnz I1, mstr_match
+    call to_str (args[0]) -> (R4)
+    ncall "text.ends_with" (recv, R4) -> (I2)
+    call mk_bool (I2) -> (R5)
+    ret R5
+mstr_match:
+    strcmp I1, name, "match?"
+    bnz I1, mstr_gsub
+    call op_match (recv, args[0]) -> (R4)
+    ret R4
+mstr_gsub:
+    strcmp I1, name, "gsub"
+    bz I1, mstr_gdo
+    strcmp I1, name, "replace"
+    bnz I1, mstr_toi
+mstr_gdo:
+    mov R4, args[0]
+    call to_str (args[1]) -> (R5)
+    bisa R4, AilRegex, mstr_gre
+    call to_str (R4) -> (R6)
+    ncall "text.replace" (recv, R6, R5) -> (R7)
+    ret R7
+mstr_gre:
+    ncall "regex.compile" (R4->AilRegex.pattern, R4->AilRegex.flags) -> (R6)
+    ncall "regex.replace" (R6, recv, R5, -1) -> (R7, I2)
+    ret R7
+mstr_toi:
+    strcmp I1, name, "to_i"
+    bnz I1, mstr_tof
+    parse.i64 I2, recv
+    call mk_int (I2) -> (R4)
+    ret R4
+mstr_tof:
+    strcmp I1, name, "to_f"
+    bnz I1, no_method
+    parse.f64 F0, recv
+    call mk_float (F0) -> (R4)
+    ret R4
+
+; -- Array (list) methods & Enumerable internal iterators --
+m_list:
+    strcmp I1, name, "length"
+    bz I1, ml_len
+    strcmp I1, name, "size"
+    bz I1, ml_len
+    strcmp I1, name, "count"
+    bnz I1, ml_emp
+ml_len:
+    len I2, recv
+    call mk_int (I2) -> (R4)
+    ret R4
+ml_emp:
+    strcmp I1, name, "empty?"
+    bnz I1, ml_first
+    len I2, recv
+    seq I2, I2, 0
+    call mk_bool (I2) -> (R4)
+    ret R4
+ml_first:
+    strcmp I1, name, "first"
+    bnz I1, ml_last
+    len I2, recv
+    bz I2, ml_ret_nil
+    mov R4, recv[0]
+    ret R4
+ml_last:
+    strcmp I1, name, "last"
+    bnz I1, ml_push
+    len I2, recv
+    bz I2, ml_ret_nil
+    sub I2, I2, 1
+    mov R4, recv[I2]
+    ret R4
+ml_ret_nil:
+    ret null
+ml_push:
+    strcmp I1, name, "push"
+    bnz I1, ml_pop
+    mov R4, args[0]
+    lpush recv, R4
+    ret recv
+ml_pop:
+    strcmp I1, name, "pop"
+    bnz I1, ml_join
+    len I2, recv
+    bz I2, ml_ret_nil
+    lpop R4, recv
+    ret R4
+ml_join:
+    strcmp I1, name, "join"
+    bnz I1, ml_rev
+    mov R4, ""
+    len I2, args
+    bz I2, ml_jgo
+    call to_str (args[0]) -> (R4)
+ml_jgo:
+    lnew R5
+    len I3, recv
+    mov I4, 0
+ml_jl:
+    bge I4, I3, ml_jd
+    mov R6, recv[I4]
+    call to_str (R6) -> (R7)
+    lpush R5, R7
+    inc I4
+    jmp ml_jl
+ml_jd:
+    ncall "text.join" (R5, R4) -> (R8)
+    ret R8
+ml_rev:
+    strcmp I1, name, "reverse"
+    bnz I1, ml_inc
+    lnew R4
+    len I2, recv
+    sub I2, I2, 1
+ml_rvl:
+    blt I2, 0, ml_rvd
+    mov R5, recv[I2]
+    lpush R4, R5
+    sub I2, I2, 1
+    jmp ml_rvl
+ml_rvd:
+    ret R4
+ml_inc:
+    strcmp I1, name, "include?"
+    bnz I1, ml_take
+    mov R4, args[0]
+    len I2, recv
+    mov I3, 0
+ml_il:
+    bge I3, I2, ml_ino
+    mov R5, recv[I3]
+    call eq_raw (R5, R4) -> (I4)
+    bnz I4, ml_iyes
+    inc I3
+    jmp ml_il
+ml_iyes:
+    call mk_bool (1) -> (R6)
+    ret R6
+ml_ino:
+    call mk_bool (0) -> (R6)
+    ret R6
+ml_take:
+    strcmp I1, name, "take"
+    bnz I1, ml_drop
+    call to_i64 (args[0]) -> (I2)
+    lnew R4
+    len I3, recv
+    mov I4, 0
+ml_tkl:
+    bge I4, I2, ml_tkd
+    bge I4, I3, ml_tkd
+    mov R5, recv[I4]
+    lpush R4, R5
+    inc I4
+    jmp ml_tkl
+ml_tkd:
+    ret R4
+ml_drop:
+    strcmp I1, name, "drop"
+    bnz I1, ml_each
+    ; Support both drop(n) and Context view log.drop(:kind)!
+    bisa args[0], AilSym, ml_drop_kind
+    typeof I5, args[0]
+    beq I5, 1, ml_drop_kind
+    call to_i64 (args[0]) -> (I2)
+    lnew R4
+    len I3, recv
+    mov I4, I2
+ml_drl:
+    bge I4, I3, ml_drd
+    mov R5, recv[I4]
+    lpush R4, R5
+    inc I4
+    jmp ml_drl
+ml_drd:
+    ret R4
+ml_drop_kind:
+    call to_str (args[0]) -> (R4)
+    lnew R5
+    len I2, recv
+    mov I3, 0
+ml_dkl:
+    bge I3, I2, ml_dkd
+    mov R6, recv[I3]
+    inc I3
+    typeof I4, R6
+    bne I4, 6, ml_dkkeep
+    mget.r R7, R6, "kind", ""
+    strcmp I5, R7, R4
+    bz I5, ml_dkl
+ml_dkkeep:
+    lpush R5, R6
+    jmp ml_dkl
+ml_dkd:
+    ret R5
+ml_each:
+    strcmp I1, name, "each"
+    bnz I1, ml_ewi
+    len I2, recv
+    mov I3, 0
+ml_el:
+    bge I3, I2, ml_ed
+    mov R4, recv[I3]
+    lnew R5
+    lpush R5, R4
+    call call_val (block, R5, null) -> (R6)
+    inc I3
+    jmp ml_el
+ml_ed:
+    ret recv
+ml_ewi:
+    strcmp I1, name, "each_with_index"
+    bnz I1, ml_map
+    len I2, recv
+    mov I3, 0
+ml_ewl:
+    bge I3, I2, ml_ewd
+    mov R4, recv[I3]
+    call mk_int (I3) -> (R5)
+    lnew R6
+    lpush R6, R4, R5
+    call call_val (block, R6, null) -> (R7)
+    inc I3
+    jmp ml_ewl
+ml_ewd:
+    ret recv
+ml_map:
+    strcmp I1, name, "map"
+    bnz I1, ml_fmap
+    lnew R4
+    len I2, recv
+    mov I3, 0
+ml_ml:
+    bge I3, I2, ml_md
+    mov R5, recv[I3]
+    lnew R6
+    lpush R6, R5
+    call call_val (block, R6, null) -> (R7)
+    lpush R4, R7
+    inc I3
+    jmp ml_ml
+ml_md:
+    ret R4
+ml_fmap:
+    strcmp I1, name, "flat_map"
+    bnz I1, ml_sel
+    lnew R4
+    len I2, recv
+    mov I3, 0
+ml_fml:
+    bge I3, I2, ml_fmd
+    mov R5, recv[I3]
+    lnew R6
+    lpush R6, R5
+    call call_val (block, R6, null) -> (R7)
+    bz.r R7, ml_fmn
+    typeof I4, R7
+    bne I4, 5, ml_fms
+    len I5, R7
+    mov I6, 0
+ml_fmi:
+    bge I6, I5, ml_fmn
+    mov R8, R7[I6]
+    lpush R4, R8
+    inc I6
+    jmp ml_fmi
+ml_fms:
+    lpush R4, R7
+ml_fmn:
+    inc I3
+    jmp ml_fml
+ml_fmd:
+    ret R4
+ml_sel:
+    strcmp I1, name, "select"
+    bz I1, ml_sel_go
+    strcmp I1, name, "filter"
+    bnz I1, ml_rej
+ml_sel_go:
+    lnew R4
+    len I2, recv
+    mov I3, 0
+ml_sl:
+    bge I3, I2, ml_sd
+    mov R5, recv[I3]
+    lnew R6
+    lpush R6, R5
+    call call_val (block, R6, null) -> (R7)
+    call is_truthy (R7) -> (I4)
+    bz I4, ml_sn
+    lpush R4, R5
+ml_sn:
+    inc I3
+    jmp ml_sl
+ml_sd:
+    ret R4
+ml_rej:
+    strcmp I1, name, "reject"
+    bnz I1, ml_red
+    lnew R4
+    len I2, recv
+    mov I3, 0
+ml_rjl:
+    bge I3, I2, ml_rjd
+    mov R5, recv[I3]
+    lnew R6
+    lpush R6, R5
+    call call_val (block, R6, null) -> (R7)
+    call is_truthy (R7) -> (I4)
+    bnz I4, ml_rjn
+    lpush R4, R5
+ml_rjn:
+    inc I3
+    jmp ml_rjl
+ml_rjd:
+    ret R4
+ml_red:
+    strcmp I1, name, "reduce"
+    bz I1, ml_red_go
+    strcmp I1, name, "inject"
+    bnz I1, ml_any
+ml_red_go:
+    len I2, recv
+    len I3, args
+    bnz I3, ml_red_init
+    bz I2, ml_ret_nil
+    mov R4, recv[0]
+    mov I4, 1
+    jmp ml_red_l
+ml_red_init:
+    mov R4, args[0]
+    mov I4, 0
+ml_red_l:
+    bge I4, I2, ml_red_d
+    mov R5, recv[I4]
+    lnew R6
+    lpush R6, R4, R5
+    call call_val (block, R6, null) -> (R4)
+    inc I4
+    jmp ml_red_l
+ml_red_d:
+    ret R4
+ml_any:
+    strcmp I1, name, "any?"
+    bnz I1, ml_all
+    len I2, recv
+    mov I3, 0
+ml_anyl:
+    bge I3, I2, ml_any_f
+    mov R4, recv[I3]
+    lnew R5
+    lpush R5, R4
+    call call_val (block, R5, null) -> (R6)
+    call is_truthy (R6) -> (I4)
+    bnz I4, ml_any_t
+    inc I3
+    jmp ml_anyl
+ml_any_t:
+    call mk_bool (1) -> (R7)
+    ret R7
+ml_any_f:
+    call mk_bool (0) -> (R7)
+    ret R7
+ml_all:
+    strcmp I1, name, "all?"
+    bnz I1, ml_find
+    len I2, recv
+    mov I3, 0
+ml_alll:
+    bge I3, I2, ml_all_t
+    mov R4, recv[I3]
+    lnew R5
+    lpush R5, R4
+    call call_val (block, R5, null) -> (R6)
+    call is_truthy (R6) -> (I4)
+    bz I4, ml_all_f
+    inc I3
+    jmp ml_alll
+ml_all_t:
+    call mk_bool (1) -> (R7)
+    ret R7
+ml_all_f:
+    call mk_bool (0) -> (R7)
+    ret R7
+ml_find:
+    strcmp I1, name, "find"
+    bnz I1, no_method
+    len I2, recv
+    mov I3, 0
+ml_fndl:
+    bge I3, I2, ml_ret_nil
+    mov R4, recv[I3]
+    lnew R5
+    lpush R5, R4
+    call call_val (block, R5, null) -> (R6)
+    call is_truthy (R6) -> (I4)
+    bnz I4, ml_fnd_ok
+    inc I3
+    jmp ml_fndl
+ml_fnd_ok:
+    ret R4
+
+; -- Hash (map) methods --
+m_map:
+    strcmp I1, name, "length"
+    bz I1, mm_len
+    strcmp I1, name, "size"
+    bnz I1, mm_emp
+mm_len:
+    mkeys R4, recv
+    len I2, R4
+    call mk_int (I2) -> (R5)
+    ret R5
+mm_emp:
+    strcmp I1, name, "empty?"
+    bnz I1, mm_keys
+    mkeys R4, recv
+    len I2, R4
+    seq I2, I2, 0
+    call mk_bool (I2) -> (R5)
+    ret R5
+mm_keys:
+    strcmp I1, name, "keys"
+    bnz I1, mm_vals
+    mkeys R4, recv
+    ret R4
+mm_vals:
+    strcmp I1, name, "values"
+    bnz I1, mm_has
+    mkeys R4, recv
+    lnew R5
+    len I2, R4
+    mov I3, 0
+mm_vl:
+    bge I3, I2, mm_vd
+    mov R6, R4[I3]
+    mget.r R7, recv, R6, null
+    lpush R5, R7
+    inc I3
+    jmp mm_vl
+mm_vd:
+    ret R5
+mm_has:
+    strcmp I1, name, "has_key?"
+    bz I1, mm_hgo
+    strcmp I1, name, "key?"
+    bnz I1, mm_each
+mm_hgo:
+    call to_str (args[0]) -> (R4)
+    mhas I2, recv, R4
+    call mk_bool (I2) -> (R5)
+    ret R5
+mm_each:
+    strcmp I1, name, "each"
+    bnz I1, mm_field
+    mkeys R4, recv
+    len I2, R4
+    mov I3, 0
+mm_el:
+    bge I3, I2, mm_ed
+    mov R5, R4[I3]
+    mget.r R6, recv, R5, null
+    lnew R7
+    lpush R7, R5, R6
+    call call_val (block, R7, null) -> (R8)
+    inc I3
+    jmp mm_el
+mm_ed:
+    ret recv
+mm_field:
+    ; Allow dot-access on hash keys (e.g. msg.text or d.queue)
+    mhas I2, recv, name
+    bz I2, no_method
+    mget.r R4, recv, name, null
+    ret R4
+
+no_method:
+    strcat R4, "undefined method '", name, "'"
+    call mk_exc ("NoMethodError", R4) -> (R5)
+    throw R5
+.endf
+
+; ---- Builtin functions & stdlib modules ----
+
+.func builtin_call(ref name, ref args, ref block) -> ref
+    strcmp I0, name, "puts"
+    bnz I0, b_print
+    len I1, args
+    mov I2, 0
+bp_l:
+    bge I2, I1, bp_d
+    mov R3, args[I2]
+    call to_str (R3) -> (R4)
+    ncall "io.print_s" (R4)
+    ncall "io.nl"
+    inc I2
+    jmp bp_l
+bp_d:
+    bnz I1, bp_ret
+    ncall "io.nl"
+bp_ret:
+    ret null
+
+b_print:
+    strcmp I0, name, "print"
+    bnz I0, b_ro
+    len I1, args
+    mov I2, 0
+bpr_l:
+    bge I2, I1, bpr_d
+    mov R3, args[I2]
+    call to_str (R3) -> (R4)
+    ncall "io.print_s" (R4)
+    inc I2
+    jmp bpr_l
+bpr_d:
+    ret null
+
+b_ro:
+    strcmp I0, name, "read_only"
+    bnz I0, b_rw
+    call to_str (args[0]) -> (R3)
+    mnew R4
+    mset R4, "mode", "ro"
+    mset R4, "path", R3
+    ret R4
+
+b_rw:
+    strcmp I0, name, "read_write"
+    bnz I0, b_allow
+    call to_str (args[0]) -> (R3)
+    mnew R4
+    mset R4, "mode", "rw"
+    mset R4, "path", R3
+    ret R4
+
+b_allow:
+    strcmp I0, name, "allow"
+    bnz I0, b_reject
+    new R3, AilGuardResult
+    mov R3->AilGuardResult.verdict, "allow"
+    mov R3->AilGuardResult.reason, ""
+    mov R3->AilGuardResult.value, null
+    ret R3
+
+b_reject:
+    strcmp I0, name, "reject"
+    bnz I0, b_redact
+    mov R4, "rejected by guard"
+    len I1, args
+    bz I1, brej_mk
+    call to_str (args[0]) -> (R4)
+brej_mk:
+    new R3, AilGuardResult
+    mov R3->AilGuardResult.verdict, "reject"
+    mov R3->AilGuardResult.reason, R4
+    mov R3->AilGuardResult.value, null
+    ret R3
+
+b_redact:
+    strcmp I0, name, "redact"
+    bnz I0, b_escalate
+    mov R4, null
+    len I1, args
+    bz I1, bred_mk
+    mov R4, args[0]
+bred_mk:
+    new R3, AilGuardResult
+    mov R3->AilGuardResult.verdict, "redact"
+    mov R3->AilGuardResult.reason, "redacted"
+    mov R3->AilGuardResult.value, R4
+    ret R3
+
+b_escalate:
+    strcmp I0, name, "escalate"
+    bnz I0, b_sleep
+    mov R4, "escalated"
+    len I1, args
+    bz I1, besc_mk
+    call to_str (args[0]) -> (R4)
+besc_mk:
+    new R3, AilGuardResult
+    mov R3->AilGuardResult.verdict, "escalate"
+    mov R3->AilGuardResult.reason, R4
+    mov R3->AilGuardResult.value, null
+    ret R3
+
+b_sleep:
+    strcmp I0, name, "sleep_ms"
+    bnz I0, b_file_read
+    call to_i64 (args[0]) -> (I1)
+    sleep I1
+    ret null
+
+b_file_read:
+    strcmp I0, name, "File.read"
+    bnz I0, b_file_write
+    call to_str (args[0]) -> (R3)
+    ncall "fs.read_file" (R3) -> (R4)
+    strcat R5, R4
+    ret R5
+
+b_file_write:
+    strcmp I0, name, "File.write"
+    bnz I0, b_file_exists
+    call to_str (args[0]) -> (R3)
+    call to_str (args[1]) -> (R4)
+    ncall "fs.write_file" (R3, R4)
+    ret null
+
+b_file_exists:
+    strcmp I0, name, "File.exists?"
+    bnz I0, b_file_list
+    call to_str (args[0]) -> (R3)
+    ncall "fs.exists" (R3) -> (I1)
+    call mk_bool (I1) -> (R4)
+    ret R4
+
+b_file_list:
+    strcmp I0, name, "File.list"
+    bnz I0, b_files_glob
+    mov R3, "."
+    len I1, args
+    bz I1, bfl_go
+    call to_str (args[0]) -> (R3)
+bfl_go:
+    ncall "fs.list" (R3) -> (R4)
+    ret R4
+
+b_files_glob:
+    strcmp I0, name, "Files.glob"
+    bnz I0, b_json_parse
+    mov R3, "."
+    mov R4, ""
+    len I1, args
+    bz I1, bfg_walk
+    call to_str (args[0]) -> (R4)
+    blt I1, 2, bfg_walk
+    call to_str (args[1]) -> (R3)
+bfg_walk:
+    lnew R5
+    call walk_dir (R3, R5)
+    ; If a suffix filter like "*.ail" or "*.c" was given, filter by extension
+    len I2, R4
+    bz I2, bfg_all
+    ncall "text.starts_with" (R4, "*.") -> (I3)
+    bz I3, bfg_all
+    substr R6, R4, 1, I2
+    lnew R7
+    len I4, R5
+    mov I5, 0
+bfg_fl:
+    bge I5, I4, bfg_fd
+    mov R8, R5[I5]
+    inc I5
+    ncall "text.ends_with" (R8, R6) -> (I6)
+    bz I6, bfg_fl
+    lpush R7, R8
+    jmp bfg_fl
+bfg_fd:
+    ret R7
+bfg_all:
+    ret R5
+
+b_json_parse:
+    strcmp I0, name, "JSON.parse"
+    bnz I0, b_json_str
+    call to_str (args[0]) -> (R3)
+    ncall "json.parse" (R3) -> (R4)
+    call wrap_json (R4) -> (R5)
+    ret R5
+
+b_json_str:
+    strcmp I0, name, "JSON.stringify"
+    bnz I0, b_cfg_get
+    call unwrap_json (args[0]) -> (R3)
+    mov I1, 0
+    len I2, args
+    blt I2, 2, bjs_go
+    call to_i64 (args[1]) -> (I1)
+bjs_go:
+    ncall "json.stringify" (R3, I1) -> (R4)
+    ret R4
+
+b_cfg_get:
+    strcmp I0, name, "Config.get"
+    bnz I0, b_cfg_load
+    call to_str (args[0]) -> (R3)
+    call to_str (args[1]) -> (R4)
+    call cfg.get_binding_raw (R3, R4) -> (R5)
+    call wrap_json (R5) -> (R6)
+    ret R6
+
+b_cfg_load:
+    strcmp I0, name, "Config.load"
+    bnz I0, b_ctx_new
+    call to_str (args[0]) -> (R3)
+    call cfg.load_env (R3)
+    ret null
+
+b_ctx_new:
+    strcmp I0, name, "Context.new"
+    bnz I0, b_unknown
+    mov R3, null
+    len I1, args
+    bz I1, bcn_go
+    mov R3, args[0]
+bcn_go:
+    call mk_context (R3) -> (R4)
+    ret R4
+
+b_unknown:
+    strcat R3, "undefined function '", name, "'"
+    call mk_exc ("NoMethodError", R3) -> (R4)
+    throw R4
+.endf
+
+; ---- Lexical environment helpers ----
+
+.func env_new(ref parent, i64 is_block) -> ref
+    mnew R1
+    mset R1, "__parent__", parent
+    mset R1, "__block__", is_block
+    ret R1
+.endf
+
+.func env_def(ref env, ref name, ref val)
+    mset env, name, val
+    ret
+.endf
+
+.func env_get(ref env, ref name) -> (i64, ref)
+    mov R2, env
+eg_loop:
+    bz.r R2, eg_none
+    mhas I0, R2, name
+    bnz I0, eg_found
+    mget.r R2, R2, "__parent__", null
+    jmp eg_loop
+eg_found:
+    mget.r R3, R2, name, null
+    ret 1, R3
+eg_none:
+    ret 0, null
+.endf
+
+.func env_set(ref env, ref name, ref val)
+    ; Walk enclosing block scopes to update an existing binding (Ruby block semantics)
+    mov R3, env
+es_walk:
+    bz.r R3, es_local
+    mhas I0, R3, name
+    bnz I0, es_update
+    mget I1, R3, "__block__", 0
+    bz I1, es_local
+    mget.r R3, R3, "__parent__", null
+    jmp es_walk
+es_update:
+    mset R3, name, val
+    ret
+es_local:
+    mset env, name, val
+    ret
+.endf
+
+.func has_builtin(ref name) -> i64
+    strcmp I0, name, "puts"
+    bz I0, hb_y
+    strcmp I0, name, "print"
+    bz I0, hb_y
+    strcmp I0, name, "read_only"
+    bz I0, hb_y
+    strcmp I0, name, "read_write"
+    bz I0, hb_y
+    strcmp I0, name, "allow"
+    bz I0, hb_y
+    strcmp I0, name, "reject"
+    bz I0, hb_y
+    strcmp I0, name, "redact"
+    bz I0, hb_y
+    strcmp I0, name, "escalate"
+    bz I0, hb_y
+    strcmp I0, name, "sleep_ms"
+    bz I0, hb_y
+    ret 0
+hb_y:
+    ret 1
+.endf

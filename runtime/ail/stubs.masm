@@ -1,0 +1,139 @@
+; ail.stubs - Runtime stubs for v0.2/v0.3 constructs parsed & verified in v0.1
+
+.module ail.stubs
+.import ail.core as core
+.export mk_agent, mk_flow, mk_skill, run_decide, run_a2a, pipe_op, fallback_op, parallel_op
+
+.func mk_agent(ref name, ref meta) -> ref
+    call core.mk_obj (null) -> (R2)
+    mset R2->core.AilObj.fields, "__kind__", "agent"
+    mset R2->core.AilObj.fields, "name", name
+    mset R2->core.AilObj.fields, "meta", meta
+    ret R2
+.endf
+
+.func mk_flow(ref name, ref meta) -> ref
+    call core.mk_obj (null) -> (R2)
+    mset R2->core.AilObj.fields, "__kind__", "flow"
+    mset R2->core.AilObj.fields, "name", name
+    mset R2->core.AilObj.fields, "meta", meta
+    ret R2
+.endf
+
+.func mk_skill(ref name, ref doc, ref instructions) -> ref
+    call core.mk_obj (null) -> (R3)
+    mset R3->core.AilObj.fields, "__kind__", "skill"
+    mset R3->core.AilObj.fields, "name", name
+    mset R3->core.AilObj.fields, "doc", doc
+    mset R3->core.AilObj.fields, "instructions", instructions
+    ret R3
+.endf
+
+.func run_decide(ref model_name, ref input_val, ref schema_json) -> ref
+    strcat R3, "System 1 'decide' runtime is scheduled for v0.3.0 (schema verified: ", schema_json, ")"
+    call core.mk_exc ("NotImplementedError", R3) -> (R4)
+    throw R4
+.endf
+
+.func run_a2a(ref name, ref version, ref desc, ref handler) -> ref
+    strcat R4, "a2a_agent '", name, "' runtime is scheduled for v0.3.0"
+    call core.mk_exc ("NotImplementedError", R4) -> (R5)
+    throw R5
+.endf
+
+; Inline pipeline operator: a --> b (works on lambdas/tools right now in v0.1!)
+.func pipe_apply(ref self_v, ref args, ref block) -> ref
+    mov R3, UP[0]                     ; lhs callable
+    mov R4, UP[1]                     ; rhs callable
+    call core.call_val (R3, args, null) -> (R5)
+    lnew R6
+    lpush R6, R5
+    call core.call_val (R4, R6, null) -> (R7)
+    ret R7
+.endf
+
+.func pipe_op(ref lhs, ref rhs) -> ref
+    closure pipe_apply (lhs, rhs) -> (R2)
+    call core.mk_closure (R2) -> (R3)
+    ret R3
+.endf
+
+; Fallback operator: a | b (tries lhs; on exception runs rhs!)
+.func fallback_apply(ref self_v, ref args, ref block) -> ref
+    mov R3, UP[0]
+    mov R4, UP[1]
+.try use_rhs
+    call core.call_val (R3, args, null) -> (R5)
+.endtry
+    ret R5
+use_rhs:
+    catch R6
+    call core.call_val (R4, args, null) -> (R7)
+    ret R7
+.endf
+
+.func fallback_op(ref lhs, ref rhs) -> ref
+    closure fallback_apply (lhs, rhs) -> (R2)
+    call core.mk_closure (R2) -> (R3)
+    ret R3
+.endf
+
+; Parallel fan-out operator: a & b (runs both in parallel MLWSVM processes!)
+.func par_worker(i64 parent, i64 idx, ref fn, ref args)
+    call core.init ()
+.try failed
+    call core.call_val (fn, args, null) -> (R3)
+.endtry
+    lnew R4
+    lpush R4, idx, 1, R3
+    send parent, R4
+    ret
+failed:
+    catch R5
+    lnew R4
+    lpush R4, idx, 0, R5
+    send parent, R4
+    ret
+.endf
+
+.func parallel_apply(ref self_v, ref args, ref block) -> ref
+    mov R3, UP[0]
+    mov R4, UP[1]
+    spawnm par_worker (PID, 0, R3, args) -> (I0)
+    spawnm par_worker (PID, 1, R4, args) -> (I1)
+    lnew R5
+    mov R8, null
+    lpush R5, R8, R8
+    mov I2, 0                         ; replies received
+    mov I3, 0                         ; downs received
+    mov R9, null                      ; first error
+wait_loop:
+    bge I3, 2, done
+    recv R6
+    bisa R6, Down, got_down
+    mov I4, R6[0]                     ; idx
+    mov I5, R6[1]                     ; ok
+    mov R7, R6[2]                     ; payload
+    bnz I5, store_ok
+    bnz.r R9, wait_loop
+    mov R9, R7
+    jmp wait_loop
+store_ok:
+    mov R5[I4], R7
+    inc I2
+    jmp wait_loop
+got_down:
+    inc I3
+    jmp wait_loop
+done:
+    bz.r R9, ret_ok
+    throw R9
+ret_ok:
+    ret R5
+.endf
+
+.func parallel_op(ref lhs, ref rhs) -> ref
+    closure parallel_apply (lhs, rhs) -> (R2)
+    call core.mk_closure (R2) -> (R3)
+    ret R3
+.endf

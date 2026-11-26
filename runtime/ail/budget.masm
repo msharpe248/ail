@@ -1,0 +1,193 @@
+; ail.budget - Scoped budgets (within), dynamic context (@ail_ctx), retries
+
+.module ail.budget
+.import ail.core as core
+.export get_ctx, set_ctx, spawn_ctx, run_within, run_retry, mk_budget
+
+; Per-process context global (per R3 agreement: inherited via spawn trampoline)
+ail_ctx: .zero 8
+
+.func get_ctx -> ref
+    mov R0, @ail_ctx
+    ret R0
+.endf
+
+.func set_ctx(ref v)
+    mov @ail_ctx, v
+    ret
+.endf
+
+; Trampoline worker that installs parent's @ail_ctx before running body
+.func ctx_trampoline(ref inherited_ctx, ref fn, ref args)
+    call core.init ()
+    mov @ail_ctx, inherited_ctx
+    calli fn (null, args, null) -> (R3)
+    ret
+.endf
+
+; spawn_ctx(fn, args) -> pid (spawnl with @ail_ctx propagation)
+.func spawn_ctx(ref fn, ref args) -> i64
+    mov R2, @ail_ctx
+    spawnl ctx_trampoline (R2, fn, args) -> (I0)
+    ret I0
+.endf
+
+; mk_budget(kwargs_map) -> AilBudget
+.func mk_budget(ref opts) -> ref
+    new R1, core.AilBudget
+    mov R1->core.AilBudget.opts, opts
+    mov R1->core.AilBudget.timeout_ms, -1
+    bz.r opts, 9f
+    mhas I0, opts, "timeout"
+    bz I0, 9f
+    mget R2, opts, "timeout", null
+    bz.r R2, 9f
+    bisa R2, core.AilDur, 1f
+    bisa R2, core.AilInt, 2f
+    jmp 9f
+1:  mov I1, R2->core.AilDur.ms
+    mov R1->core.AilBudget.timeout_ms, I1
+    jmp 9f
+2:  mov I1, R2->core.AilInt.v
+    mov R1->core.AilBudget.timeout_ms, I1
+9:  ret R1
+.endf
+
+; Scope worker for `within budget(...) do ... end`
+.func within_worker(i64 parent, ref inherited_ctx, ref budget_obj, ref body_fn)
+    call core.init ()
+    ; Push new context map carrying budget reference
+    mnew R4
+    bz.r inherited_ctx, 1f
+    mset R4, "parent", inherited_ctx
+1:  mset R4, "budget", budget_obj
+    mov @ail_ctx, R4
+.try failed
+    lnew R5
+    calli body_fn (null, R5, null) -> (R6)
+.endtry
+    lnew R7
+    lpush R7, 1, R6
+    send parent, R7
+    ret
+failed:
+    catch R8
+    lnew R7
+    lpush R7, 0, R8
+    send parent, R7
+    ret
+.endf
+
+; run_within(budget_obj, body_fn) -> ref
+; Runs body_fn inside an isolated spawnm scope process with timeout enforcement.
+.func run_within(ref budget_obj, ref body_fn) -> ref
+    mov R2, @ail_ctx
+    mov I0, -1
+    bz.r budget_obj, 1f
+    bnisa budget_obj, core.AilBudget, 1f
+    mov I0, budget_obj->core.AilBudget.timeout_ms
+1:  spawnm within_worker (PID, R2, budget_obj, body_fn) -> (I1)
+    blt I0, 0, wait_forever
+    recvt R3, I0, timed_out
+    jmp got_msg
+wait_forever:
+    recv R3
+got_msg:
+    bisa R3, Down, died_early
+    ; Got [ok, val]; drain Down
+    recv R4
+    mov I2, R3[0]
+    mov R5, R3[1]
+    bnz I2, ok
+    throw R5
+ok:
+    ret R5
+timed_out:
+    kill I1
+    ; Drain either late reply or Down until we see Down
+drain:
+    recv R6
+    bnisa R6, Down, drain
+    call core.mk_exc ("BudgetExceeded", "within budget timeout exceeded") -> (R7)
+    throw R7
+died_early:
+    ; Check if E_QUOTA -> BudgetExceeded
+    mov R8, R3->Down.code
+    bz.r R8, died_generic
+    strcmp I3, R8, "E_QUOTA"
+    bnz I3, died_generic
+    call core.mk_exc ("BudgetExceeded", R3->Down.message) -> (R7)
+    throw R7
+died_generic:
+    call core.mk_exc ("RuntimeError", R3->Down.message) -> (R7)
+    throw R7
+.endf
+
+; run_retry(count_val, opts_map, body_fn) -> ref
+; Retries body_fn up to count_val times on exceptions (optional backoff & on: filter).
+.func run_retry(ref count_val, ref opts, ref body_fn) -> ref
+    call core.to_i64 (count_val) -> (I0)
+    bgt I0, 0, 1f
+    mov I0, 1
+1:  mov I1, 1                         ; attempt = 1
+    mov I2, 50                        ; base backoff ms
+    mov I3, 0                         ; backoff mode: 0 none, 1 fixed, 2 exponential
+    bz.r opts, loop
+    mhas I4, opts, "backoff"
+    bz I4, loop
+    mget R3, opts, "backoff", null
+    bz.r R3, loop
+    bnisa R3, core.AilSym, loop
+    strcmp I5, R3->core.AilSym.name, "exponential"
+    bnz I5, chk_fixed
+    mov I3, 2
+    jmp loop
+chk_fixed:
+    strcmp I5, R3->core.AilSym.name, "fixed"
+    bnz I5, loop
+    mov I3, 1
+loop:
+    call core.mk_int (I1) -> (R4)
+    lnew R5
+    lpush R5, R4
+.try caught
+    calli body_fn (null, R5, null) -> (R6)
+.endtry
+    ret R6
+caught:
+    catch R7
+    bge I1, I0, rethrow
+    ; Check optional `on:` filter list
+    bz.r opts, do_sleep
+    mhas I6, opts, "on"
+    bz I6, do_sleep
+    mget R8, opts, "on", null
+    bz.r R8, do_sleep
+    typeof I7, R8
+    bne I7, 5, do_sleep               ; expect list
+    len I8, R8
+    mov I9, 0
+    mov I10, 0
+chk_on:
+    bge I9, I8, chk_on_done
+    mov R9, R8[I9]
+    call core.to_str (R9) -> (R10)
+    call core.exc_matches (R7, R10) -> (I11)
+    bnz I11, matched_on
+    inc I9
+    jmp chk_on
+matched_on:
+    mov I10, 1
+chk_on_done:
+    bz I10, rethrow
+do_sleep:
+    bz I3, next_try
+    sleep I2
+    bne I3, 2, next_try
+    mul I2, I2, 2
+next_try:
+    inc I1
+    jmp loop
+rethrow:
+    throw R7
+.endf

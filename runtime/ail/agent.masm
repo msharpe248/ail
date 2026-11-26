@@ -1,0 +1,563 @@
+; ail.agent - Autonomous guarded Agent runtime
+; Combines named LLMs, local tools (cap.restrict), MCP client tools,
+; Agent Skills (SKILL.md + inline progressive disclosure), coded guardrails,
+; multi-view Context, limits (max_turns, tokens, retries), and structured returns.
+
+.module ail.agent
+.import ail.core as core
+.import ail.config as cfg
+.import ail.budget as budget
+.import ail.sandbox as sandbox
+.import ail.llm as llm
+.import ail.mcp_client as mcpc
+.import ail.skill as skill
+.import ail.context as ctxmod
+.export init, mk_agent, run_agent
+
+inited:    .i64 0
+agent_cls: .zero 8
+
+; ---- Helpers ----
+
+; Build OpenAI-format tools_spec list from list of AilTool objects
+.func build_tools_spec(ref tool_list) -> ref
+    lnew R1
+    bz.r tool_list, done
+    len I0, tool_list
+    mov I1, 0
+1:  bge I1, I0, done
+    mov R2, tool_list[I1]
+    inc I1
+    bnisa R2, core.AilTool, 1b
+    mnew R3
+    mset R3, "type", "function"
+    mnew R4
+    mset R4, "name", R2->core.AilTool.name
+    mov R5, R2->core.AilTool.doc
+    bnz.r R5, 2f
+    mov R5, ""
+2:  mset R4, "description", R5
+.try bad_schema
+    ncall "json.parse" (R2->core.AilTool.schema_json) -> (R6)
+.endtry
+    jmp set_p
+bad_schema:
+    catch R9
+    mnew R6
+set_p:
+    mset R4, "parameters", R6
+    mset R3, "function", R4
+    lpush R1, R3
+    jmp 1b
+done:
+    ret R1
+.endf
+
+; Find AilTool by name in list
+.func find_tool(ref tool_list, ref name) -> ref
+    bz.r tool_list, none
+    len I0, tool_list
+    mov I1, 0
+1:  bge I1, I0, none
+    mov R2, tool_list[I1]
+    inc I1
+    bnisa R2, core.AilTool, 1b
+    strcmp I2, R2->core.AilTool.name, name
+    bnz I2, 1b
+    ret R2
+none:
+    ret null
+.endf
+
+; Run input/output/tool guards: kind = "check_input" | "check_output" | "check_tool"
+; Returns (verdict_str, value_or_reason_ref)
+.func run_guards(ref guards_list, ref hook_name, ref val, ref ctx) -> (ref, ref)
+    bz.r guards_list, ok
+    len I0, guards_list
+    mov I1, 0
+    mov R4, val
+g_loop:
+    bge I1, I0, ok_val
+    mov R5, guards_list[I1]
+    inc I1
+    bnisa R5, core.AilGuard, g_loop
+    lnew R6
+    lpush R6, R4, ctx
+    call core.send_msg (R5, hook_name, R6, null) -> (R7)
+    bnisa R7, core.AilGuardResult, g_loop
+    mov R8, R7->core.AilGuardResult.verdict
+    strcmp I2, R8, "reject"
+    bz I2, do_rej
+    strcmp I2, R8, "escalate"
+    bz I2, do_esc
+    strcmp I2, R8, "redact"
+    bnz I2, g_loop
+    mov R4, R7->core.AilGuardResult.value
+    jmp g_loop
+do_rej:
+    ret "reject", R7->core.AilGuardResult.reason
+do_esc:
+    ret "escalate", R7->core.AilGuardResult.reason
+ok_val:
+    ret "allow", R4
+ok:
+    ret "allow", val
+.endf
+
+; Callback when load_skill activates a skill: logs :skill_body in Context
+; UP[0] = ctx
+.func on_skill_activate(ref self_v, ref args, ref block) -> ref
+    mov R3, UP[0]
+    mov R4, args[0]                   ; skill name
+    mov R5, args[1]                   ; skill body
+    strcat R6, "Skill '", R4, "':\n", R5
+    call ctxmod.append_event (R3, "skill_body", R6, null)
+    ret null
+.endf
+
+; Strip markdown ```json ... ``` fences if LLM wrapped structured JSON
+.func extract_json_text(ref text) -> ref
+    ncall "text.trim" (text) -> (R1)
+    ncall "text.find" (R1, "{", 0) -> (I0)
+    blt I0, 0, ret_orig
+    len I1, R1
+    sub I2, I1, 1
+find_end:
+    blt I2, I0, ret_orig
+    mov I3, R1[I2]
+    beq I3, '}', got_end
+    sub I2, I2, 1
+    jmp find_end
+got_end:
+    sub I4, I2, I0
+    inc I4
+    substr R2, R1, I0, I4
+    ret R2
+ret_orig:
+    ret R1
+.endf
+
+; ---- Core Agent execution loop ----
+
+.func run_agent(ref ag, ref input_val, ref opts) -> ref
+    mov R3, ag->core.AilObj.fields
+    mget.r R4, R3, "model", null
+    bz.r R4, no_model
+    mget.r R5, R3, "guards", null
+    mget.r R6, R3, "tools", null
+    mget.r R7, R3, "mcp", null
+    mget.r R8, R3, "skills", null
+    mget.r R9, R3, "system", ""
+    mget.r R10, R3, "context_view", null
+    mget.r R11, R3, "caps", null
+    mget.r R12, R3, "limits", null
+    mget.r R13, R3, "returns", null
+
+    ; Resolve or create Context
+    mov R14, null
+    bz.r opts, mk_fresh_ctx
+    typeof I0, opts
+    bne I0, 6, mk_fresh_ctx
+    mget.r R14, opts, "context", null
+mk_fresh_ctx:
+    bnz.r R14, have_ctx
+    lnew R15
+    call ctxmod.new_ctx (R15) -> (R14)
+have_ctx:
+
+    ; Parse limits: max_turns (default 8), tokens (default -1), retries (default 0)
+    mov I1, 8                         ; max_turns
+    mov I2, -1                        ; max_tokens
+    mov I3, 0                         ; max_retries
+    bz.r R12, lim_done
+    mhas I4, R12, "max_turns"
+    bz I4, lim_tok
+    mget.r R15, R12, "max_turns", null
+    call core.to_i64 (R15) -> (I1)
+lim_tok:
+    mhas I4, R12, "tokens"
+    bz I4, lim_ret
+    mget.r R15, R12, "tokens", null
+    call core.to_i64 (R15) -> (I2)
+lim_ret:
+    mhas I4, R12, "retries"
+    bz I4, lim_done
+    mget.r R15, R12, "retries", null
+    call core.to_i64 (R15) -> (I3)
+lim_done:
+
+    ; 1. Input guards
+    call core.to_str (input_val) -> (R16)
+    call run_guards (R5, "check_input", R16, R14) -> (R17, R18)
+    strcmp I5, R17, "reject"
+    bz I5, guard_rej
+    strcmp I5, R17, "escalate"
+    bz I5, guard_esc
+    mov R16, R18                      ; possibly redacted input
+    call ctxmod.append_event (R14, "user", R16, null)
+
+    ; 2. Assemble effective tools list (local + skills + MCP clients)
+    lnew R19                          ; effective AilTool list
+    bz.r R6, add_skills
+    len I6, R6
+    mov I7, 0
+lt_loop:
+    bge I7, I6, add_skills
+    mov R20, R6[I7]
+    inc I7
+    lpush R19, R20
+    jmp lt_loop
+
+add_skills:
+    mov R21, R9                       ; effective system prompt
+    bnz.r R21, 1f
+    mov R21, ""
+1:  bz.r R8, add_mcps
+    call skill.load_skills (R8) -> (R22)
+    call skill.build_catalog_prompt (R22) -> (R23)
+    len I8, R23
+    bz I8, add_mcps
+    len I9, R21
+    bz I9, sk_set_sys
+    strcat R21, R21, "\n\n", R23
+    jmp sk_add_tool
+sk_set_sys:
+    mov R21, R23
+sk_add_tool:
+    closure on_skill_activate (R14) -> (R24)
+    call skill.make_load_skill_tool (R22, R24) -> (R25)
+    lpush R19, R25
+    ; Also include any inline skill tools
+    mkeys R26, R22
+    len I10, R26
+    mov I11, 0
+sk_tloop:
+    bge I11, I10, add_mcps
+    mov R27, R26[I11]
+    inc I11
+    mget.r R28, R22, R27, null
+    mov R29, R28->skill.AilSkill.tools
+    bz.r R29, sk_tloop
+    len I12, R29
+    mov I13, 0
+sk_tinner:
+    bge I13, I12, sk_tloop
+    mov R30, R29[I13]
+    inc I13
+    lpush R19, R30
+    jmp sk_tinner
+
+add_mcps:
+    lnew R22                          ; connected McpClient list (to close in cleanup)
+    bz.r R7, start_loop
+    len I6, R7
+    mov I7, 0
+mcp_loop:
+    bge I7, I6, start_loop
+    mov R23, R7[I7]
+    inc I7
+    mov R24, null                     ; binding name
+    mov R25, null                     ; only list
+    mov R26, null                     ; except list
+    typeof I8, R23
+    beq I8, 6, mcp_filter_map
+    call core.to_str (R23) -> (R24)
+    jmp mcp_conn
+mcp_filter_map:
+    ; { github: { only: [...], except: [...] } }
+    mkeys R27, R23
+    len I9, R27
+    bz I9, mcp_loop
+    mov R24, R27[0]
+    mget.r R28, R23, R24, null
+    bz.r R28, mcp_conn
+    mget.r R25, R28, "only", null
+    mget.r R26, R28, "except", null
+mcp_conn:
+    call mcpc.connect (R24) -> (R29)
+    lpush R22, R29
+    call mcpc.discover_tools (R29, R25, R26) -> (R30)
+    len I10, R30
+    mov I11, 0
+mcp_add_t:
+    bge I11, I10, mcp_loop
+    mov R27, R30[I11]
+    inc I11
+    lpush R19, R27
+    jmp mcp_add_t
+
+start_loop:
+    ; If returns Schema is specified, instruct model to respond with JSON matching schema
+    bz.r R13, loop_ready
+    bnisa R13, core.AilSchema, loop_ready
+    strcat R21, R21, "\n\nRespond ONLY with a valid JSON object conforming to this JSON Schema:\n", R13->core.AilSchema.json_schema
+
+loop_ready:
+    call build_tools_spec (R19) -> (R23) ; tools_spec for LLM
+    mov I14, 0                        ; turn counter
+    mov I15, 0                        ; total tokens used
+    mov I16, 0                        ; guard/schema retries used
+
+.try cleanup_err
+turn_loop:
+    bge I14, I1, max_turns_err
+    inc I14
+
+    ; Project context view -> messages
+    call ctxmod.project_view (R14, R10) -> (R24)
+    call ctxmod.events_to_messages (R24) -> (R25)
+
+    ; Prepend system prompt if non-empty
+    lnew R26
+    len I17, R21
+    bz I17, copy_msgs
+    mnew R27
+    mset R27, "role", "system"
+    mset R27, "content", R21
+    lpush R26, R27
+copy_msgs:
+    len I18, R25
+    mov I19, 0
+cm_l:
+    bge I19, I18, do_llm
+    mov R27, R25[I19]
+    lpush R26, R27
+    inc I19
+    jmp cm_l
+
+do_llm:
+    call llm.chat (R4, R26, R23, null) -> (R28)
+    ; Track token budget
+    mget.r R29, R28, "usage", null
+    bz.r R29, chk_calls
+    mget I20, R29, "total_tokens", 0
+    add I15, I15, I20
+    blt I2, 0, chk_calls
+    bgt I15, I2, tok_budget_err
+
+chk_calls:
+    mget.r R29, R28, "tool_calls", null
+    bz.r R29, handle_final
+    len I21, R29
+    bz I21, handle_final
+
+    ; Append assistant tool_calls message for protocol continuity
+    mnew R30
+    mset R30, "role", "assistant"
+    mget.r R27, R28, "content", ""
+    mset R30, "content", R27
+    ; Rebuild OpenAI-format tool_calls array for next turn's message history
+    lnew R24
+    mov I22, 0
+atc_l:
+    bge I22, I21, atc_d
+    mov R25, R29[I22]
+    inc I22
+    mnew R26
+    mget.r R27, R25, "id", "call_0"
+    mset R26, "id", R27
+    mset R26, "type", "function"
+    mnew R27
+    mget.r R20, R25, "name", ""
+    mget.r R15, R25, "arguments", null
+    bnz.r R15, atc_has_a
+    mnew R15
+atc_has_a:
+    ncall "json.stringify" (R15, 0) -> (R16)
+    mset R27, "name", R20
+    mset R27, "arguments", R16
+    mset R26, "function", R27
+    lpush R24, R26
+    jmp atc_l
+atc_d:
+    mset R30, "tool_calls", R24
+    call ctxmod.append_event (R14, "assistant_tool_calls", R30, null)
+
+    ; Execute each tool call
+    mov I22, 0
+exec_tc_loop:
+    bge I22, I21, turn_loop
+    mov R25, R29[I22]
+    inc I22
+    mget.r R26, R25, "id", "call_0"
+    mget.r R27, R25, "name", ""
+    mget.r R20, R25, "arguments", null
+    call core.wrap_json (R20) -> (R15)
+
+    ; Run check_tool guards
+    mnew R16
+    mset R16, "name", R27
+    mset R16, "arguments", R15
+    call run_guards (R5, "check_tool", R16, R14) -> (R17, R18)
+    strcmp I23, R17, "reject"
+    bz I23, tc_guard_rej
+    strcmp I23, R17, "escalate"
+    bz I23, guard_esc_close
+
+    ; Find & run tool
+    call find_tool (R19, R27) -> (R24)
+    bz.r R24, tc_missing
+    mov R30, R24->core.AilTool.caps
+    bnz.r R30, tc_run_it
+    mov R30, R11
+tc_run_it:
+.try tc_exec_err
+    call core.invoke_tool_with_caps (R24, R15, R30) -> (R17)
+.endtry
+    call core.to_str (R17) -> (R18)
+    jmp tc_record
+tc_exec_err:
+    catch R17
+    call core.exc_message (R17) -> (R18)
+    strcat R18, "Error: ", R18
+    jmp tc_record
+tc_missing:
+    strcat R18, "Error: unknown tool '", R27, "'"
+    jmp tc_record
+tc_guard_rej:
+    strcat R18, "Tool call blocked by guard: ", R18
+tc_record:
+    ; Append native tool result message for LLM + intermediate audit event
+    mnew R30
+    mset R30, "role", "tool"
+    mset R30, "tool_call_id", R26
+    mset R30, "content", R18
+    call ctxmod.append_event (R14, "tool_result", R30, null)
+    strcat R17, R27, " -> ", R18
+    call ctxmod.append_event (R14, "tool_intermediate", R17, null)
+    jmp exec_tc_loop
+
+handle_final:
+    mget.r R16, R28, "content", ""
+    ; Output guards
+    call run_guards (R5, "check_output", R16, R14) -> (R17, R18)
+    strcmp I23, R17, "reject"
+    bz I23, out_guard_rej
+    strcmp I23, R17, "escalate"
+    bz I23, guard_esc_close
+    mov R16, R18                      ; possibly redacted output
+
+    ; Optional structured returns Schema validation
+    bz.r R13, accept_final
+    bnisa R13, core.AilSchema, accept_final
+    call extract_json_text (R16) -> (R24)
+.try schema_fail
+    ncall "json.parse" (R24) -> (R25)
+    call core.wrap_json (R25) -> (R26)
+    lnew R27
+    lpush R27, R26
+    call core.send_msg (R13, "new", R27, null) -> (R17)
+.endtry
+    call ctxmod.append_event (R14, "assistant", R16, null)
+    call close_all_mcps (R22)
+    ret R17
+
+schema_fail:
+    catch R25
+    bge I16, I3, schema_rethrow
+    inc I16
+    call core.exc_message (R25) -> (R26)
+    strcat R27, "Your previous response did not match the required JSON schema (", R26, "). Please try again."
+    call ctxmod.append_event (R14, "user", R27, null)
+    jmp turn_loop
+schema_rethrow:
+    call close_all_mcps (R22)
+    throw R25
+
+out_guard_rej:
+    bge I16, I3, guard_rej_close
+    inc I16
+    strcat R27, "Your previous response was rejected by a guardrail: ", R18, ". Please revise your answer."
+    call ctxmod.append_event (R14, "user", R27, null)
+    jmp turn_loop
+
+accept_final:
+    call ctxmod.append_event (R14, "assistant", R16, null)
+    call close_all_mcps (R22)
+    ret R16
+
+max_turns_err:
+    call close_all_mcps (R22)
+    call core.mk_exc ("BudgetExceeded", "agent exceeded max_turns") -> (R25)
+    throw R25
+
+tok_budget_err:
+    call close_all_mcps (R22)
+    call core.mk_exc ("BudgetExceeded", "agent exceeded token budget") -> (R25)
+    throw R25
+
+guard_rej_close:
+    call close_all_mcps (R22)
+    call core.mk_exc ("GuardViolation", R18) -> (R25)
+    throw R25
+
+guard_esc_close:
+    call close_all_mcps (R22)
+    call core.mk_exc ("GuardEscalation", R18) -> (R25)
+    throw R25
+.endtry
+
+cleanup_err:
+    catch R25
+    call close_all_mcps (R22)
+    throw R25
+
+guard_rej:
+    call core.mk_exc ("GuardViolation", R18) -> (R25)
+    throw R25
+
+guard_esc:
+    call core.mk_exc ("GuardEscalation", R18) -> (R25)
+    throw R25
+
+no_model:
+    call core.mk_exc ("ConfigError", "agent has no model declared") -> (R25)
+    throw R25
+.endf
+
+.func close_all_mcps(ref clients)
+    bz.r clients, 9f
+    len I0, clients
+    mov I1, 0
+1:  bge I1, I0, 9f
+    mov R1, clients[I1]
+    inc I1
+    call mcpc.close (R1)
+    jmp 1b
+9:  ret
+.endf
+
+; ---- AilClass methods on Agent ----
+
+.func agent_run_method(ref self_v, ref args, ref block) -> ref
+    mov R3, ""
+    mov R4, null
+    len I0, args
+    bz I0, 1f
+    mov R3, args[0]
+    blt I0, 2, 1f
+    mov R4, args[1]
+1:  call run_agent (self_v, R3, R4) -> (R5)
+    ret R5
+.endf
+
+.func init
+    bnz @inited, 9f
+    call core.mk_class ("Agent", null) -> (R0)
+    closure agent_run_method () -> (R1)
+    call core.class_def_method (R0, "run", R1)
+    mov @agent_cls, R0
+    mov @inited, 1
+9:  ret
+.endf
+
+; mk_agent(name, fields_map) -> Agent AilObj
+.func mk_agent(ref name, ref fields) -> ref
+    bnz @inited, 1f
+    call init ()
+1:  mov R2, @agent_cls
+    call core.mk_obj (R2) -> (R3)
+    mset fields, "name", name
+    mov R3->core.AilObj.fields, fields
+    ret R3
+.endf

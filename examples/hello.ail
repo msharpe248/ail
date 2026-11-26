@@ -1,0 +1,41 @@
+# examples/hello.ail — Core Ruby-inspired AIL features on MLWSVM
+
+class Greeter
+  def initialize(prefix)
+    @prefix = prefix
+  end
+
+  def greet(name)
+    "#{@prefix}, #{name}!"
+  end
+end
+
+g = Greeter.new("Hello")
+puts g.greet("AIL")
+
+# Internal iterators & block closures mutating outer state
+nums = [1, 2, 3, 4, 5, 6]
+evens_doubled = nums.select { |n| n.even? }.map { |n| n * 2 }
+sum = 0
+evens_doubled.each do |x|
+  sum += x
+end
+puts "sum=#{sum}"
+
+# Exact decimal arithmetic (MLWSVM .dec)
+cost = 0.10d + 0.20d
+puts "cost=#{cost}"
+
+# Regex matching
+puts "match=#{"ssn: 123-45-6789".match?(/\b\d{3}-\d{2}-\d{4}\b/)}"
+
+# Structured exceptions with ensure
+cleaned = false
+res = begin
+  raise RuntimeError, "boom"
+rescue RuntimeError => e
+  "caught:#{e.message}"
+ensure
+  cleaned = true
+end
+puts "#{res}:cleaned=#{cleaned}"

@@ -1,0 +1,510 @@
+; ail.mcp - Live MCP JSON-RPC 2.0 server (--stdio and Streamable HTTP --http)
+
+.module ail.mcp
+.import ail.core as core
+.import ail.sandbox as sandbox
+.import std.http as http
+.export new_server, add_tool, add_resource, add_prompt, set_caps, serve, handle_jsonrpc
+
+.struct McpServer
+    name: ref
+    version: ref
+    tools: ref        ; map: name -> AilTool
+    resources: ref    ; map: uri -> map{uri, mime, fn}
+    prompts: ref      ; map: name -> map{name, doc, fn}
+    caps: ref         ; optional cap.restrict grants map
+.ends
+
+.func new_server(ref name, ref version) -> ref
+    new R2, McpServer
+    mov R2->McpServer.name, name
+    mov R2->McpServer.version, version
+    mnew R3
+    mov R2->McpServer.tools, R3
+    mnew R4
+    mov R2->McpServer.resources, R4
+    mnew R5
+    mov R2->McpServer.prompts, R5
+    mov R2->McpServer.caps, null
+    ret R2
+.endf
+
+.func set_caps(ref srv, ref grants)
+    mov srv->McpServer.caps, grants
+    ret
+.endf
+
+.func add_tool(ref srv, ref tool_obj)
+    mov R2, srv->McpServer.tools
+    mov R3, tool_obj->core.AilTool.name
+    mset R2, R3, tool_obj
+    ret
+.endf
+
+.func add_resource(ref srv, ref uri, ref mime, ref fn)
+    mov R4, srv->McpServer.resources
+    mnew R5
+    mset R5, "uri", uri
+    mset R5, "mime", mime
+    mset R5, "fn", fn
+    mset R4, uri, R5
+    ret
+.endf
+
+.func add_prompt(ref srv, ref name, ref doc, ref fn)
+    mov R4, srv->McpServer.prompts
+    mnew R5
+    mset R5, "name", name
+    mset R5, "doc", doc
+    mset R5, "fn", fn
+    mset R4, name, R5
+    ret
+.endf
+
+; Build JSON-RPC 2.0 success response map
+.func rpc_ok(ref id_list, ref result) -> ref
+    mnew R2
+    mset R2, "jsonrpc", "2.0"
+    bz.r id_list, 1f
+    len I0, id_list
+    bz I0, 1f
+    tagof I1, id_list[0]
+    beq I1, 6, id_int
+    mov R3, id_list[0]
+    mset R2, "id", R3
+    jmp 2f
+id_int:
+    mov I2, id_list[0]
+    mset R2, "id", I2
+    jmp 2f
+1:  mov R3, null
+    mset R2, "id", R3
+2:  mset R2, "result", result
+    ret R2
+.endf
+
+; Build JSON-RPC 2.0 error response map
+.func rpc_err(ref id_list, i64 code, ref msg) -> ref
+    mnew R2
+    mset R2, "jsonrpc", "2.0"
+    bz.r id_list, 1f
+    len I1, id_list
+    bz I1, 1f
+    tagof I2, id_list[0]
+    beq I2, 6, eid_int
+    mov R3, id_list[0]
+    mset R2, "id", R3
+    jmp 2f
+eid_int:
+    mov I3, id_list[0]
+    mset R2, "id", I3
+    jmp 2f
+1:  mov R3, null
+    mset R2, "id", R3
+2:  mnew R4
+    mset R4, "code", code
+    mset R4, "message", msg
+    mset R2, "error", R4
+    ret R2
+.endf
+
+; Extract raw id into a 1-element list (preserving i64 or string tag), or null if notification
+.func extract_id(ref req) -> ref
+    mhas I0, req, "id"
+    bz I0, no_id
+    lnew R1
+    ; Check tag by trying string/int via json round-trip or direct map copy
+    ; MLWSVM untyped mov preserves tag? Read into list via mget with tag check:
+    ; Use json.stringify/parse_any or check with try!
+.try try_int
+    mget.r R2, req, "id", null
+    lpush R1, R2
+    ret R1
+.endtry
+try_int:
+    catch R9
+    mget I1, req, "id", 0
+    lpush R1, I1
+    ret R1
+no_id:
+    ret null
+.endf
+
+; handle_jsonrpc(srv, json_text) -> response_json_text (or null for notifications)
+.func handle_jsonrpc(ref srv, ref text) -> ref
+.try parse_err
+    ncall "json.parse" (text) -> (R2)
+.endtry
+    typeof I0, R2
+    bne I0, 6, bad_req
+    call extract_id (R2) -> (R3)     ; null if notification
+    mget.r R4, R2, "method", null
+    bz.r R4, bad_req
+
+    ; notifications/* -> return null (no response required)
+    ncall "text.starts_with" (R4, "notifications/") -> (I1)
+    bz I1, 1f
+    ret null
+
+    ; initialize
+1:  strcmp I2, R4, "initialize"
+    bnz I2, 2f
+    mnew R5
+    mset R5, "protocolVersion", "2025-03-26"
+    mnew R6
+    mnew R7
+    mset R6, "tools", R7
+    mnew R8
+    mset R6, "resources", R8
+    mnew R9
+    mset R6, "prompts", R9
+    mset R5, "capabilities", R6
+    mnew R10
+    mset R10, "name", srv->McpServer.name
+    mset R10, "version", srv->McpServer.version
+    mset R5, "serverInfo", R10
+    call rpc_ok (R3, R5) -> (R11)
+    ncall "json.stringify" (R11, 0) -> (R12)
+    ret R12
+
+    ; ping
+2:  strcmp I2, R4, "ping"
+    bnz I2, 3f
+    mnew R5
+    call rpc_ok (R3, R5) -> (R11)
+    ncall "json.stringify" (R11, 0) -> (R12)
+    ret R12
+
+    ; tools/list
+3:  strcmp I2, R4, "tools/list"
+    bnz I2, 4f
+    lnew R5                           ; tools array
+    mov R6, srv->McpServer.tools
+    mkeys R7, R6
+    len I3, R7
+    mov I4, 0
+tl_loop:
+    bge I4, I3, tl_done
+    mov R8, R7[I4]
+    mget.r R9, R6, R8, null
+    mnew R10
+    mset R10, "name", R9->core.AilTool.name
+    mov R11, R9->core.AilTool.doc
+    bnz.r R11, tl_has_doc
+    mov R11, ""
+tl_has_doc:
+    mset R10, "description", R11
+    ncall "json.parse" (R9->core.AilTool.schema_json) -> (R12)
+    mset R10, "inputSchema", R12
+    lpush R5, R10
+    inc I4
+    jmp tl_loop
+tl_done:
+    mnew R13
+    mset R13, "tools", R5
+    call rpc_ok (R3, R13) -> (R14)
+    ncall "json.stringify" (R14, 0) -> (R15)
+    ret R15
+
+    ; tools/call
+4:  strcmp I2, R4, "tools/call"
+    bnz I2, 5f
+    mget.r R5, R2, "params", null
+    bz.r R5, bad_params
+    mget.r R6, R5, "name", null
+    bz.r R6, bad_params
+    mov R7, srv->McpServer.tools
+    mhas I3, R7, R6
+    bz I3, tool_not_found
+    mget.r R8, R7, R6, null           ; AilTool
+    mget.r R9, R5, "arguments", null
+    bnz.r R9, tc_has_args
+    mnew R9
+tc_has_args:
+    ; Wrap JSON arguments map into an AIL Hash and invoke tool (with server caps fallback)
+    call core.wrap_json (R9) -> (R10)
+    mov R11, R8->core.AilTool.caps
+    bnz.r R11, tc_run
+    mov R11, srv->McpServer.caps
+tc_run:
+.try tc_err
+    call core.invoke_tool_with_caps (R8, R10, R11) -> (R12)
+.endtry
+    ; Format result as MCP content text: lists/maps/objs as JSON, scalars via to_str
+    bz.r R12, tc_scalar
+    typeof I5, R12
+    beq I5, 5, tc_as_json
+    beq I5, 6, tc_as_json
+    bisa R12, core.AilObj, tc_as_json
+tc_scalar:
+    call core.to_str (R12) -> (R14)
+    jmp tc_wrap_res
+tc_as_json:
+    call core.unwrap_json (R12) -> (R13)
+    ncall "json.stringify" (R13, 0) -> (R14)
+tc_wrap_res:
+    lnew R15
+    mnew R16
+    mset R16, "type", "text"
+    mset R16, "text", R14
+    lpush R15, R16
+    mnew R17
+    mset R17, "content", R15
+    mset R17, "isError", false
+    call rpc_ok (R3, R17) -> (R18)
+    ncall "json.stringify" (R18, 0) -> (R19)
+    ret R19
+tc_err:
+    catch R20
+    call core.exc_message (R20) -> (R21)
+    lnew R15
+    mnew R16
+    mset R16, "type", "text"
+    mset R16, "text", R21
+    lpush R15, R16
+    mnew R17
+    mset R17, "content", R15
+    mset R17, "isError", true
+    call rpc_ok (R3, R17) -> (R18)
+    ncall "json.stringify" (R18, 0) -> (R19)
+    ret R19
+
+    ; resources/list
+5:  strcmp I2, R4, "resources/list"
+    bnz I2, 6f
+    lnew R5
+    mov R6, srv->McpServer.resources
+    mkeys R7, R6
+    len I3, R7
+    mov I4, 0
+rl_loop:
+    bge I4, I3, rl_done
+    mov R8, R7[I4]
+    mget.r R9, R6, R8, null
+    mnew R10
+    mget.r R11, R9, "uri", ""
+    mget.r R12, R9, "mime", "text/plain"
+    mset R10, "uri", R11
+    mset R10, "name", R11
+    mset R10, "mimeType", R12
+    lpush R5, R10
+    inc I4
+    jmp rl_loop
+rl_done:
+    mnew R13
+    mset R13, "resources", R5
+    call rpc_ok (R3, R13) -> (R14)
+    ncall "json.stringify" (R14, 0) -> (R15)
+    ret R15
+
+    ; resources/read
+6:  strcmp I2, R4, "resources/read"
+    bnz I2, 7f
+    mget.r R5, R2, "params", null
+    bz.r R5, bad_params
+    mget.r R6, R5, "uri", null
+    bz.r R6, bad_params
+    mov R7, srv->McpServer.resources
+    mhas I3, R7, R6
+    bz I3, res_not_found
+    mget.r R8, R7, R6, null
+    mget.r R9, R8, "fn", null
+    mget.r R10, R8, "mime", "text/plain"
+    lnew R11
+    mov R12, srv->McpServer.caps
+    bz.r R12, rr_direct
+    call sandbox.run_sandboxed (R12, R9, null, R11, null) -> (R13)
+    jmp rr_fmt
+rr_direct:
+    calli R9 (null, R11, null) -> (R13)
+rr_fmt:
+    call core.to_str (R13) -> (R14)
+    lnew R15
+    mnew R16
+    mset R16, "uri", R6
+    mset R16, "mimeType", R10
+    mset R16, "text", R14
+    lpush R15, R16
+    mnew R17
+    mset R17, "contents", R15
+    call rpc_ok (R3, R17) -> (R18)
+    ncall "json.stringify" (R18, 0) -> (R19)
+    ret R19
+
+    ; prompts/list
+7:  strcmp I2, R4, "prompts/list"
+    bnz I2, unknown_method
+    lnew R5
+    mov R6, srv->McpServer.prompts
+    mkeys R7, R6
+    len I3, R7
+    mov I4, 0
+pl_loop:
+    bge I4, I3, pl_done
+    mov R8, R7[I4]
+    mget.r R9, R6, R8, null
+    mnew R10
+    mget.r R11, R9, "name", ""
+    mget.r R12, R9, "doc", ""
+    mset R10, "name", R11
+    mset R10, "description", R12
+    lpush R5, R10
+    inc I4
+    jmp pl_loop
+pl_done:
+    mnew R13
+    mset R13, "prompts", R5
+    call rpc_ok (R3, R13) -> (R14)
+    ncall "json.stringify" (R14, 0) -> (R15)
+    ret R15
+
+parse_err:
+    catch R25
+    call rpc_err (null, -32700, "Parse error") -> (R26)
+    ncall "json.stringify" (R26, 0) -> (R27)
+    ret R27
+bad_req:
+    call rpc_err (null, -32600, "Invalid Request") -> (R26)
+    ncall "json.stringify" (R26, 0) -> (R27)
+    ret R27
+bad_params:
+    call rpc_err (R3, -32602, "Invalid params") -> (R26)
+    ncall "json.stringify" (R26, 0) -> (R27)
+    ret R27
+tool_not_found:
+    strcat R28, "Unknown tool: ", R6
+    call rpc_err (R3, -32602, R28) -> (R26)
+    ncall "json.stringify" (R26, 0) -> (R27)
+    ret R27
+res_not_found:
+    strcat R28, "Unknown resource: ", R6
+    call rpc_err (R3, -32602, R28) -> (R26)
+    ncall "json.stringify" (R26, 0) -> (R27)
+    ret R27
+unknown_method:
+    strcat R28, "Method not found: ", R4
+    call rpc_err (R3, -32601, R28) -> (R26)
+    ncall "json.stringify" (R26, 0) -> (R27)
+    ret R27
+.endf
+
+; ---- HTTP handler closure for Streamable HTTP (--http host:port) ----
+
+.func http_handler(ref req) -> ref
+    call core.init ()
+    mov R1, UP[0]                     ; McpServer
+    mget.r R2, req, "method", ""
+    mget.r R3, req, "path", ""
+
+    ; GET /health
+    strcmp I0, R2, "GET"
+    bnz I0, chk_post
+    strcmp I0, R3, "/health"
+    bnz I0, not_found
+    mnew R4
+    mset R4, "status", 200
+    mnew R5
+    mset R5, "Content-Type", "application/json"
+    mset R4, "headers", R5
+    strcat R6, "{\"status\":\"ok\",\"server\":\"", R1->McpServer.name, "\"}"
+    mset R4, "body", R6
+    ret R4
+
+chk_post:
+    strcmp I0, R2, "POST"
+    bnz I0, not_found
+    mget.r R7, req, "body", ""
+    call handle_jsonrpc (R1, R7) -> (R8)
+    bnz.r R8, ret_json
+    mnew R4
+    mset R4, "status", 202
+    mset R4, "body", ""
+    ret R4
+ret_json:
+    mnew R4
+    mset R4, "status", 200
+    mnew R5
+    mset R5, "Content-Type", "application/json"
+    mset R4, "headers", R5
+    mset R4, "body", R8
+    ret R4
+
+not_found:
+    mnew R4
+    mset R4, "status", 404
+    mset R4, "body", "Not Found\n"
+    ret R4
+.endf
+
+; ---- Entrypoint: serve(srv) inspects os.args for --stdio or --http host:port ----
+
+.func serve(ref srv)
+    ncall "os.args" -> (R1)
+    len I0, R1
+    mov I1, 0
+    mov I2, 0                         ; mode: 0=stdio, 1=http
+    mov R2, "127.0.0.1"               ; host
+    mov I3, 8080                      ; port
+arg_loop:
+    bge I1, I0, start_mode
+    mov R3, R1[I1]
+    inc I1
+    strcmp I4, R3, "--stdio"
+    bnz I4, chk_http
+    mov I2, 0
+    jmp arg_loop
+chk_http:
+    strcmp I4, R3, "--http"
+    bnz I4, arg_loop
+    mov I2, 1
+    bge I1, I0, start_mode
+    mov R4, R1[I1]
+    inc I1
+    ; Parse host:port or :port
+    ncall "text.find" (R4, ":", 0) -> (I5)
+    blt I5, 0, parse_port_only
+    len I6, R4
+    add I7, I5, 1
+    sub I8, I6, I7
+    substr R5, R4, I7, I8
+    parse.i64 I3, R5
+    bz I5, arg_loop
+    substr R2, R4, 0, I5
+    jmp arg_loop
+parse_port_only:
+    parse.i64 I3, R4
+    jmp arg_loop
+
+start_mode:
+    bnz I2, run_http
+
+    ; --stdio mode: read newline-delimited JSON-RPC from stdin, write to stdout
+    ncall "fs.stdin" -> (R6)
+    ncall "fs.stdout" -> (R7)
+stdio_loop:
+    ncall "fs.read_line" (R6) -> (R8)
+    bz.r R8, stdio_done
+    ncall "text.trim" (R8) -> (R8)
+    len I9, R8
+    bz I9, stdio_loop
+    call handle_jsonrpc (srv, R8) -> (R9)
+    bz.r R9, stdio_loop
+    strcat R10, R9, "\n"
+    ncall "fs.write" (R7, R10)
+    ncall "io.flush"
+    jmp stdio_loop
+stdio_done:
+    ret
+
+run_http:
+    closure http_handler (srv) -> (R6)
+    call http.start (R2, I3, R6) -> (I10, I11)
+    ncall "fs.stderr" -> (R7)
+    tostr R8, I11
+    strcat R9, "ail mcp_server '", srv->McpServer.name, "' listening on http://", R2, ":", R8, "/mcp\n"
+    ncall "fs.write" (R7, R9)
+    ; Wait until server process ends
+    monitor I10
+    recv R10
+    ret
+.endf

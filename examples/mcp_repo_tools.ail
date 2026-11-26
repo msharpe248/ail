@@ -1,0 +1,41 @@
+# examples/mcp_repo_tools.ail — Instant VM-sandboxed MCP server
+# Run stdio: ./ail run examples/mcp_repo_tools.ail -- --stdio
+# Run HTTP:  ./ail run examples/mcp_repo_tools.ail -- --http 127.0.0.1:8080
+
+schema SearchHit
+  field :file, String, "File path"
+  field :matches, Int, "Matching lines"
+end
+
+tool :search_code, "Search repository files matching a regex pattern" do
+  param :pattern, String, "Regular expression to search for"
+  param :limit,   Int = 10, "Maximum number of files to return"
+  returns Array[SearchHit]
+
+  capabilities fs: read_only("./"), net: :none, run: :none
+
+  Files.glob("*.ail")
+    .select { |f| File.read(f).match?(pattern) }
+    .take(limit)
+end
+
+mcp_server "repo-tools", version: "0.1.0" do
+  capabilities fs: read_only("./"), net: :none, run: :none
+
+  expose search_code
+
+  tool :word_count, "Count whitespace-separated words in text" do
+    param :text, String, "Input text"
+    returns Int
+
+    text.strip.split.size
+  end
+
+  resource "repo://readme", mime: "text/markdown" do
+    File.read("README.md")
+  end
+
+  prompt :code_review, "Review a file for bugs" do
+    "Review the code carefully for edge cases and resource limits."
+  end
+end

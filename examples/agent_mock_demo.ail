@@ -1,0 +1,79 @@
+# examples/agent_mock_demo.ail — Deterministic v0.2.0 end-to-end test:
+# Agent + MCP stdio client + SKILL.md progressive disclosure + inline skill + Guards + Context db/views
+
+use llm: :assistant
+use llm: :summarizer
+use mcp: :repo_tools
+use skills: :local
+use db: :demo_sessions
+
+guard SafetyGuard do
+  check_input do |msg, ctx|
+    return reject("Blocked input") if msg.include?("DROP TABLE")
+    allow
+  end
+
+  check_output do |msg, ctx|
+    if msg.match?(/\b\d{3}-\d{2}-\d{4}\b/)
+      return redact(msg.gsub(/\b\d{3}-\d{2}-\d{4}\b/, "[REDACTED]"))
+    end
+    allow
+  end
+end
+
+skill :style_guide, "Keep replies concise" do
+  instructions <<~MD
+    Keep all responses short and direct.
+  MD
+end
+
+agent DemoAgent do
+  model        :assistant
+  context_view :llm_compact
+  mcp          [{ repo_tools: { only: [:word_count] } }]
+  skills       [:local, :style_guide]
+  guards       [SafetyGuard]
+  limits       max_turns: 5, tokens: 10000
+
+  system <<~PROMPT
+    You are a helpful AIL test agent.
+  PROMPT
+end
+
+# 1. Input guard rejects malicious prompt before calling LLM
+blocked = begin
+  DemoAgent.run("Please run DROP TABLE users")
+rescue GuardViolation => e
+  "blocked:#{e.message}"
+end
+puts "input_guard=#{blocked}"
+
+# 2. Multi-turn Agent run: activates SKILL.md + calls live stdio MCP server + output guard redacts SSN
+ctx = Context.new(db: :demo_sessions)
+ctx.define_view :llm_compact do |log|
+  log.drop(:tool_intermediate)
+end
+
+answer = DemoAgent.run("Count words using MCP and math-helper skill", context: ctx)
+puts "agent_answer=#{answer}"
+
+# 3. Verify non-destructive Context views (audit vs compact vs compacted summary + fork)
+audit_n = ctx.view(:audit).size
+compact_n = ctx.view(:llm_compact).size
+puts "views=audit:#{audit_n}:compact:#{compact_n}"
+
+ctx.define_view :summarized do |log|
+  log.drop(:tool_intermediate).compact_before(-2, using: :summarizer).limit_tokens(2000)
+end
+puts "summarized_n=#{ctx.view(:summarized).size}"
+
+branch = ctx.fork
+branch.append(:user, "branch only")
+puts "fork=orig:#{ctx.view(:audit).size}:branch:#{branch.view(:audit).size}"
+
+# 4. Direct programmatic MCP client call
+cl = MCP.connect(:repo_tools)
+wc = cl.call_tool(:word_count, { text: "one two three four five" })
+rd = cl.read_resource("repo://readme")
+cl.close
+puts "mcp_direct=#{wc}:readme=#{rd.include?("AIL")}"
