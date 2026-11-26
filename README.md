@@ -1,48 +1,111 @@
 # AIL — AI Language
 
-**AIL** is a general-purpose, Ruby-inspired programming language targeting [MLWSVM](../mlws-vm) (`0.30.0`), built with first-class inference-side AI constructs: schemas, sandboxed tools, coded guardrails, scoped budgets, append-only multi-view contexts, System 1 decisions (Jev-style), agents, MCP servers & clients, Agent Skills, stateful flows (`-->`), pluggable RAG, and A2A agents.
+**AIL** (*AI Language*) is a general-purpose, Ruby-inspired programming language targeting [**MLWSVM**](https://github.com/msharpe248/mlws-vm) (`0.30.0`), designed from the ground up with first-class inference-side AI primitives: typed `schema`s, VM-sandboxed `tool`s, programmable `guard`s, scoped `within budget(...)` deadlines, append-only multi-view `Context`s, System 1 `decide`, autonomous streaming `agent`s, instant `mcp_server`s & MCP clients, Agent Skills (`SKILL.md`), stateful `flow` graphs (`-->`), pluggable flat-`f32` RAG (`Knowledge`), and live `a2a_agent` servers.
+
+AIL is written in **plain C11 with zero external compiler dependencies** and compiles directly to MLWSVM assembly (`.masm`) or standalone bundled binaries.
+
+---
+
+## Why AIL?
+
+- **Code never hardcodes providers or databases:** Source files declare logical names (`use llm: :fast`, `use s1: :router`, `use vector_db: :kb`, `use mcp: :repo_tools`) mapped at runtime via `.ail.env` / `.mlws.env` — swap between offline mocks, local Ollama/vLLM, and cloud APIs without editing a line of code.
+- **VM-enforced safety, not prompt suggestions:** `tool` capabilities run inside MLWSVM `cap.restrict` sandboxes, `within budget(...)` enforces monotonic wall-clock deadlines via MLWSVM `quota 6`, and `flow` graphs reject unbounded cycles at compile time.
+- **Ruby-like ergonomics:** Clean `def`/`class`/block/closure syntax, internal iterators, exact decimals (`0.25d`), durations (`30.s`), multi-file `require`, an interactive REPL (`ail repl`), and source-mapped debugging (`ail debug`).
+
+---
 
 ## Documentation
 
-- **[Programming Guide](docs/GUIDE.md)** — Tutorial from first program to multi-file AI apps, streaming agents, flows, RAG, MCP, and A2A.
-- **[Standard Library & Runtime Reference](docs/STDLIB.md)** — Complete method reference for primitives, collections, `File`/`JSON`/`Env`/`Time`/`Math`/`Random`, AI runtime types, exceptions, and `.ail.env` configuration.
-- **[Worked Examples Index](docs/EXAMPLES.md)** — Catalog of runnable single-file and multi-file examples (mock + live Ollama).
-- **[Language Specification](docs/SPEC.md)** — Formal grammar, semantics, and architecture notes.
+| Document | Description |
+|---|---|
+| [Programming Guide](docs/GUIDE.md) | End-to-end tutorial from Hello World to multi-file agents, streaming, flows, RAG, MCP, and A2A |
+| [Standard Library & Runtime Reference](docs/STDLIB.md) | Complete API reference for core types, stdlib modules, AI runtime objects, exceptions, and `.ail.env` |
+| [Worked Examples Index](docs/EXAMPLES.md) | Catalog of runnable single-file, multi-file, mock, and live Ollama examples |
+| [Language Specification](docs/SPEC.md) | Concise language overview, constructs, and version history (`v0.1.0`–`v0.5.0`) |
 
-## Status (`v0.5.0` — Targeting Released MLWSVM `0.30.0`)
+---
 
-- **Full Language Frontend (C11, zero external deps):** Lexes, parses, resolves multi-file `require`/`require_relative` (with diamond deduplication & circular-import detection), and statically checks the entire AIL language (`use`, `schema`, `tool`, `guard`, `skill`, `decide`, `context`, `agent`, `flow`/`-->`, `within budget`, `retry_up_to`, `mcp_server`, `a2a_agent`, plus the Ruby-inspired core).
-- **Developer Tooling:**
-  - `ail check` — Static type/schema/flow-cycle verification.
-  - `ail run` — Compile and execute directly on MLWSVM `0.30.0` with signal forwarding (`SIGINT`/`SIGTERM`/`SIGHUP`).
-  - `ail repl` — Interactive Read-Eval-Print Loop (`:help`, `:defs`, `:reset`, `:quit`) with `.inspect` formatting.
-  - `ail debug` — Interactive MLWSVM debugger with `.loc` source mapping across `require`d files and `.debug_format core.debug_format` pretty-printing.
-  - `ail bundle` — Ship any AIL program, MCP server, or A2A agent as a standalone executable binary.
-- **Live Runtime on MLWSVM `0.30.0` (`runtime/ail/*.masm`):**
-  - Core Ruby-like language & stdlib: primitives, exact decimals (`0.25d`), durations (`30.s`), symbols (`:foo`), string interpolation, heredocs (`<<~`), arrays (`compact`/`uniq`/`flatten`/`sort`/`group_by`/`each`/`map`/`select`/`reject`/`reduce`/`flat_map`/`take`), hashes (`fetch`/`delete`/`merge`), strings (`chomp`/`chars`/`slice`/`sub`/`gsub`), ranges, regex, classes, closures/blocks, `begin`/`rescue`/`ensure`/`raise`, plus `File`, `JSON`, `Env`, `Time`, `Math`, `Random`.
-  - Unified config bindings via MLWSVM `.mlws.env` / `.ail.env` (`llm`, `s1`, `embedder`, `db`, `vector_db`, `mcp`, `skills`).
-  - `schema`, VM-enforced `tool` sandboxing (`cap.restrict`), coded `guard`, `within budget(...)` (`quota 6` inherited wall-clock deadlines + `proc.deadline_ms`), and `retry_up_to`.
-  - Live `mcp_server` (`--stdio` & Streamable HTTP `--http`) + MCP clients + graceful `os.trap` (`SIGINT`/`SIGTERM`/`SIGHUP`).
-  - Agent Skills (`skill` inline + `SKILL.md` directories with progressive disclosure via `load_skill`).
-  - Append-only multi-view `Context` (`:audit` vs composable views, `checkpoint`/`rewind`/`fork`, `memory`/`jsonl` `db` persistence).
-  - Autonomous `agent` runtime with live token streaming (`Agent.stream { |tok| ... }` via MLWSVM `std.http` `open`/`read_chunk`/`close`), `openai`/Ollama/vLLM/`llama.cpp`, `anthropic`, and `mock` drivers.
-  - System 1 `decide`, stateful `flow` graphs + inline chaining (`-->`, `|`, `&`), flat `f32` `Knowledge` RAG (`vec.top_k` & `vec.normalize_into`), and live `a2a_agent` HTTP servers.
+## Prerequisites & Build
+
+AIL requires a C11 compiler (`cc`/`clang`/`gcc`) and [**MLWSVM `0.30.0+`**](https://github.com/msharpe248/mlws-vm) either in a sibling directory (`../mlws-vm/mlwsvm`), on your `PATH`, or pointed to via `MLWSVM=/path/to/mlwsvm`.
+
+```sh
+# 1. Build MLWSVM (if not already installed)
+git clone https://github.com/msharpe248/mlws-vm.git
+make -C mlws-vm
+
+# 2. Build AIL
+git clone https://github.com/msharpe248/ail.git
+cd ail
+make
+./ail version          # ail 0.5.0
+```
+
+---
 
 ## Quick Start
 
 ```sh
-make                         # builds ./ail (plain C11)
-./ail version                # prints ail 0.5.0
-./ail repl                   # interactive AIL REPL
-./ail check examples/full_spec_check.ail
+# Run the core Ruby-like language demo
 ./ail run examples/hello.ail
+
+# Start the interactive REPL
+./ail repl
+
+# Run the worked multi-file Support Desk app (require + RAG + System 1 + Flow + Agent + Guard)
 ./ail run examples/support_desk/main.ail --env examples/support_desk/mock.ail.env
-./ail run examples/flow_rag_demo.ail --env examples/flow_rag.ail.env
-./ail run examples/stream_ollama.ail --env examples/ollama_v03.ail.env
+
+# Run an instant VM-sandboxed MCP server (--stdio or Streamable HTTP)
 ./ail run examples/mcp_repo_tools.ail -- --stdio
+./ail run examples/mcp_repo_tools.ail -- --http 127.0.0.1:8080
+
+# Run a live A2A agent HTTP server (Agent Card + JSON-RPC 2.0 + graceful SIGTERM)
 ./ail run examples/a2a_support.ail --env examples/flow_rag.ail.env -- --http 127.0.0.1:9000
+
+# Run live against local Ollama (e.g. gemma4:31b-mlx)
+./ail run examples/stream_ollama.ail --env examples/ollama_v03.ail.env
+./ail run examples/support_desk/main.ail --env examples/support_desk/ollama.ail.env
+
+# Debug with .loc source mapping and pretty-printed AIL values
 ./ail debug examples/hello.ail
+
+# Bundle any AIL program or MCP/A2A server into a standalone executable
 ./ail bundle examples/mcp_repo_tools.ail -o repo-tools
-make test                    # deterministic compiler, runtime, multi-file, REPL, MCP, Agent, Flow, RAG & A2A suite
-make test-ollama             # live end-to-end agent, decide, and streaming tests against local Ollama
+```
+
+---
+
+## CLI Commands
+
+```text
+ail check  <file.ail>                     Lex, parse, verify schemas & flow graphs
+ail build  <file.ail> [-o out.masm]       Compile to MLWSVM assembly (.masm)
+ail run    <file.ail> [--env FILE] [-- <args...>]
+                                          Compile and execute on mlwsvm
+ail debug  <file.ail> [--env FILE]        Launch mlwsvm debugger with .loc source info
+ail repl   [--env FILE]                   Start interactive AIL REPL
+ail bundle <file.ail> -o <bin>            Bundle into a standalone executable
+ail version                               Print version
+```
+
+---
+
+## Repository Layout
+
+| Directory | Contents |
+|---|---|
+| [`src/`](src/README.md) | Zero-dependency C11 compiler (`lexer`, `parser`, `ast`, `require` loader, `sema`, `codegen`, CLI/REPL) |
+| [`runtime/ail/`](runtime/ail/README.md) | Layered MLWSVM `0.30.0` runtime modules (`core`, `agent`, `llm`, `mcp`, `skill`, `context`, `budget`, `s1`, `flow`, `vector`, `a2a`) |
+| [`examples/`](examples/README.md) | Runnable single-file & multi-file examples ([`support_desk/`](examples/support_desk/README.md)), plus mock and Ollama `.ail.env` configs |
+| [`docs/`](docs/README.md) | Programming Guide, Standard Library Reference, Examples Index, and Language Spec |
+| [`tests/`](tests/README.md) | End-to-end deterministic test suite (26 tests) and negative compile-time fixtures |
+
+---
+
+## Testing
+
+```sh
+make check-examples    # Static verification of every example
+make test              # 26 deterministic compiler, runtime, multi-file, REPL, MCP, Agent, Flow, RAG, A2A & bundle tests
+make test-ollama       # Live end-to-end Agent, System 1 decide, and SSE streaming tests against local Ollama
 ```
