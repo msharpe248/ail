@@ -7,6 +7,19 @@
 .import std.http as http
 .export chat
 
+; Tighten timeout_ms against MLWSVM v0.30.0 proc.deadline_ms() if a quota 6 deadline is active
+.func clamp_timeout(i64 timeout_ms) -> i64
+    ncall "proc.deadline_ms" -> (I1)
+    blt I1, 0, ret_orig
+    bge I1, timeout_ms, ret_orig
+    bgt I1, 0, ret_rem
+    ret 1
+ret_rem:
+    ret I1
+ret_orig:
+    ret timeout_ms
+.endf
+
 ; ---- Helper: count assistant messages in history (for scripted mock driver) ----
 
 .func count_assistant_msgs(ref msgs) -> i64
@@ -25,63 +38,86 @@
 .endf
 
 ; ---- Helper: extract integer safely from a native JSON map ----
-
+; Note: def is I0 -> use I1/I2 as temporaries!
 .func map_get_i64(ref m, ref key, i64 def) -> i64
     bz.r m, ret_def
-    mhas I0, m, key
-    bz I0, ret_def
+    mhas I1, m, key
+    bz I1, ret_def
 .try ret_def
-    mget I1, m, key, def
-    ret I1
+    mget I2, m, key, def
+    ret I2
 .endtry
 ret_def:
     catch R9
     ret def
 .endf
 
-; ---- Mock driver (deterministic multi-turn & tool-call testing) ----
+; ---- Mock driver (deterministic multi-turn, tool-call & streaming testing) ----
 
-.func chat_mock(ref mcfg, ref msgs, ref tools_spec) -> ref
-    mnew R3                           ; normalized result
-    lnew R4                           ; tool_calls
-    mnew R5                           ; usage
-    mset R5, "prompt_tokens", 10
-    mset R5, "completion_tokens", 8
-    mset R5, "total_tokens", 18
-    mset R3, "usage", R5
-    mset R3, "model", "mock"
+.func emit_mock_stream(ref content, ref on_token)
+    bz.r on_token, 9f
+    bz.r content, 9f
+    len I0, content
+    bz I0, 9f
+    ncall "text.split" (content, " ") -> (R2)
+    len I1, R2
+    mov I2, 0
+1:  bge I2, I1, 9f
+    mov R3, R2[I2]
+    bz I2, 2f
+    strcat R3, " ", R3
+2:  lnew R4
+    lpush R4, R3
+    call core.call_val (on_token, R4, null) -> (R5)
+    inc I2
+    jmp 1b
+9:  ret
+.endf
+
+.func chat_mock(ref mcfg, ref msgs, ref tools_spec, ref on_token) -> ref
+    mnew R4                           ; normalized result
+    lnew R5                           ; tool_calls
+    mnew R6                           ; usage
+    mset R6, "prompt_tokens", 10
+    mset R6, "completion_tokens", 8
+    mset R6, "total_tokens", 18
+    mset R4, "usage", R6
+    mset R4, "model", "mock"
 
     ; If mcfg has "script" (list of scripted turns), pick by assistant turn count
     mhas I0, mcfg, "script"
     bz I0, mock_single
-    mget.r R6, mcfg, "script", null
+    mget.r R7, mcfg, "script", null
     call count_assistant_msgs (msgs) -> (I1)
-    len I2, R6
+    len I2, R7
     bz I2, mock_single
     blt I1, I2, 1f
     sub I1, I2, 1
-1:  mov R7, R6[I1]
-    typeof I3, R7
+1:  mov R8, R7[I1]
+    typeof I3, R8
     beq I3, 1, mock_str_turn
     ; Turn object: {"content": "...", "tool_calls": [...]}
-    mget.r R8, R7, "content", ""
-    mset R3, "content", R8
-    mhas I4, R7, "tool_calls"
+    mget.r R9, R8, "content", ""
+    mset R4, "content", R9
+    call emit_mock_stream (R9, on_token)
+    mhas I4, R8, "tool_calls"
     bz I4, mock_done_tc
-    mget.r R9, R7, "tool_calls", null
-    mset R3, "tool_calls", R9
-    ret R3
+    mget.r R10, R8, "tool_calls", null
+    mset R4, "tool_calls", R10
+    ret R4
 mock_str_turn:
-    mset R3, "content", R7
+    mset R4, "content", R8
+    call emit_mock_stream (R8, on_token)
 mock_done_tc:
-    mset R3, "tool_calls", R4
-    ret R3
+    mset R4, "tool_calls", R5
+    ret R4
 
 mock_single:
-    mget.r R8, mcfg, "reply", "mock response"
-    mset R3, "content", R8
-    mset R3, "tool_calls", R4
-    ret R3
+    mget.r R9, mcfg, "reply", "mock response"
+    mset R4, "content", R9
+    call emit_mock_stream (R9, on_token)
+    mset R4, "tool_calls", R5
+    ret R4
 .endf
 
 ; ---- OpenAI-compatible HTTP/TLS driver (OpenAI, Ollama /v1, vLLM, llama.cpp) ----
@@ -93,8 +129,8 @@ mock_single:
     call map_get_i64 (mcfg, "timeout_ms", 120000) -> (I0)
     bz.r opts, 1f
     call map_get_i64 (opts, "timeout_ms", I0) -> (I0)
-
-1:  ; Strip trailing slash from url if any, then append /chat/completions
+1:  call clamp_timeout (I0) -> (I0)
+    ; Strip trailing slash from url if any, then append /chat/completions
     ncall "text.ends_with" (R4, "/") -> (I1)
     bz I1, 2f
     len I2, R4
@@ -223,6 +259,203 @@ json_err:
     throw R22
 bad_resp:
     strcat R21, "LLM response missing choices[0].message from ", R7
+    call core.mk_exc ("LLMError", R21) -> (R22)
+    throw R22
+.endf
+
+; ---- OpenAI-compatible Streaming HTTP + SSE driver (uses MLWSVM v0.30.0 http.open/read_chunk/close) ----
+
+.func process_sse_line(ref line, ref content_buf, ref tc_by_idx, ref on_token)
+    ncall "text.trim" (line) -> (R4)
+    ncall "text.starts_with" (R4, "data:") -> (I0)
+    bz I0, 9f
+    len I1, R4
+    sub I2, I1, 5
+    substr R5, R4, 5, I2
+    ncall "text.trim" (R5) -> (R5)
+    len I3, R5
+    bz I3, 9f
+    strcmp I4, R5, "[DONE]"
+    bz I4, 9f
+.try 9f
+    ncall "json.parse" (R5) -> (R6)
+.endtry
+    mget.r R7, R6, "choices", null
+    bz.r R7, 9f
+    len I5, R7
+    bz I5, 9f
+    mov R8, R7[0]
+    mget.r R9, R8, "delta", null
+    bz.r R9, 9f
+    ; Streamed text token?
+    mget.r R10, R9, "content", null
+    bz.r R10, chk_tc_delta
+    len I6, R10
+    bz I6, chk_tc_delta
+    bufcat content_buf, R10
+    bz.r on_token, chk_tc_delta
+    lnew R11
+    lpush R11, R10
+    call core.call_val (on_token, R11, null) -> (R12)
+
+chk_tc_delta:
+    mget.r R13, R9, "tool_calls", null
+    bz.r R13, 9f
+    typeof I7, R13
+    bne I7, 5, 9f
+    len I8, R13
+    mov I9, 0
+tcd_l:
+    bge I9, I8, 9f
+    mov R14, R13[I9]
+    inc I9
+    call map_get_i64 (R14, "index", 0) -> (I10)
+    tostr R15, I10
+    mhas I11, tc_by_idx, R15
+    bnz I11, have_slot
+    mnew R16
+    mset R16, "id", "call_0"
+    mset R16, "name", ""
+    bufnew R17, 0
+    mset R16, "args_buf", R17
+    mset tc_by_idx, R15, R16
+have_slot:
+    mget.r R16, tc_by_idx, R15, null
+    mget.r R18, R14, "id", null
+    bz.r R18, 1f
+    mset R16, "id", R18
+1:  mget.r R19, R14, "function", null
+    bz.r R19, tcd_l
+    mget.r R20, R19, "name", null
+    bz.r R20, 2f
+    len I12, R20
+    bz I12, 2f
+    mset R16, "name", R20
+2:  mget.r R21, R19, "arguments", null
+    bz.r R21, tcd_l
+    mget.r R17, R16, "args_buf", null
+    bufcat R17, R21
+    jmp tcd_l
+9:  ret
+.endf
+
+.func chat_openai_stream(ref mcfg, ref msgs, ref tools_spec, ref opts, ref on_token) -> ref
+    mget.r R5, mcfg, "url", "https://api.openai.com/v1"
+    mget.r R6, mcfg, "model", ""
+    mget.r R7, mcfg, "api_key", null
+    call map_get_i64 (mcfg, "timeout_ms", 120000) -> (I0)
+    bz.r opts, 1f
+    call map_get_i64 (opts, "timeout_ms", I0) -> (I0)
+1:  call clamp_timeout (I0) -> (I0)
+
+    ncall "text.ends_with" (R5, "/") -> (I1)
+    bz I1, 2f
+    len I2, R5
+    sub I2, I2, 1
+    substr R5, R5, 0, I2
+2:  strcat R8, R5, "/chat/completions"
+
+    ; Parse {"stream":true} so JSON gets a true boolean tag!
+    ncall "json.parse" ("{\"stream\":true}") -> (R9)
+    mset R9, "model", R6
+    mset R9, "messages", msgs
+    bz.r tools_spec, 3f
+    len I3, tools_spec
+    bz I3, 3f
+    mset R9, "tools", tools_spec
+3:  ncall "json.stringify" (R9, 0) -> (R10)
+
+    mnew R11
+    mset R11, "Content-Type", "application/json"
+    mset R11, "Accept", "text/event-stream"
+    bz.r R7, 4f
+    len I4, R7
+    bz I4, 4f
+    strcat R12, "Bearer ", R7
+    mset R11, "Authorization", R12
+
+4:  call http.open ("POST", R8, R11, R10, I0) -> (R13)
+    mget I5, R13, "status", 0
+    blt I5, 200, st_http_err
+    bge I5, 300, st_http_err
+
+    bufnew R14, 0                     ; full assistant content
+    mnew R15                          ; streamed tool calls by index
+    mov R16, ""                       ; line remainder across arbitrary chunk boundaries
+
+.try st_close_err
+read_loop:
+    call http.read_chunk (R13) -> (R17)
+    bz.r R17, read_eof
+    strcat R16, R16, R17
+split_lines:
+    ncall "text.find" (R16, "\n", 0) -> (I6)
+    blt I6, 0, read_loop
+    substr R18, R16, 0, I6
+    len I7, R16
+    add I8, I6, 1
+    sub I9, I7, I8
+    substr R16, R16, I8, I9
+    call process_sse_line (R18, R14, R15, on_token)
+    jmp split_lines
+
+read_eof:
+    len I6, R16
+    bz I6, st_finish
+    call process_sse_line (R16, R14, R15, on_token)
+.endtry
+st_finish:
+    call http.close (R13)
+
+    ; Finalize accumulated tool calls
+    lnew R19
+    mkeys R20, R15
+    len I10, R20
+    mov I11, 0
+ftc_l:
+    bge I11, I10, build_out
+    mov R21, R20[I11]
+    inc I11
+    mget.r R22, R15, R21, null
+    mget.r R23, R22, "args_buf", null
+    strcat R24, R23
+    mnew R25
+    len I12, R24
+    bz I12, ftc_add
+.try ftc_add
+    ncall "json.parse" (R24) -> (R25)
+.endtry
+ftc_add:
+    mnew R26
+    mget.r R27, R22, "id", "call_0"
+    mget.r R28, R22, "name", ""
+    mset R26, "id", R27
+    mset R26, "name", R28
+    mset R26, "arguments", R25
+    lpush R19, R26
+    jmp ftc_l
+
+build_out:
+    mnew R27
+    mset R27, "prompt_tokens", 0
+    mset R27, "completion_tokens", 0
+    mset R27, "total_tokens", 0
+    mnew R28
+    strcat R29, R14
+    mset R28, "content", R29
+    mset R28, "tool_calls", R19
+    mset R28, "usage", R27
+    mset R28, "model", R6
+    ret R28
+
+st_close_err:
+    catch R25
+    call http.close (R13)
+    throw R25
+st_http_err:
+    call http.close (R13)
+    tostr R20, I5
+    strcat R21, "LLM streaming HTTP error ", R20, " from ", R8
     call core.mk_exc ("LLMError", R21) -> (R22)
     throw R22
 .endf
@@ -378,15 +611,20 @@ a_http_err:
 .endf
 
 ; ---- Public entrypoint: chat(model_name, messages, tools_spec, opts) -> response map ----
+; If opts["on_token"] is a callable, streams incrementally via MLWSVM v0.30.0 http.open/read_chunk!
 
 .func chat(ref model_name, ref messages, ref tools_spec, ref opts) -> ref
     call core.to_str (model_name) -> (R4)
     call cfg.require_binding ("llm", R4) -> (R5)
     mget.r R6, R5, "driver", "openai"
+    mov R10, null                     ; optional on_token callback
+    bz.r opts, dispatch
+    mget.r R10, opts, "on_token", null
 
+dispatch:
     strcmp I0, R6, "mock"
     bnz I0, chk_oai
-    call chat_mock (R5, messages, tools_spec) -> (R7)
+    call chat_mock (R5, messages, tools_spec, R10) -> (R7)
     jmp emit_evt
 chk_oai:
     strcmp I0, R6, "openai"
@@ -394,6 +632,10 @@ chk_oai:
     strcmp I0, R6, "ollama"
     bnz I0, chk_ant
 do_oai:
+    bz.r R10, do_oai_sync
+    call chat_openai_stream (R5, messages, tools_spec, opts, R10) -> (R7)
+    jmp emit_evt
+do_oai_sync:
     call chat_openai (R5, messages, tools_spec, opts) -> (R7)
     jmp emit_evt
 chk_ant:

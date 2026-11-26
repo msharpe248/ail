@@ -54,9 +54,17 @@ ail_ctx: .zero 8
 .endf
 
 ; Scope worker for `within budget(...) do ... end`
+; Applies MLWSVM v0.30.0 quota 6 (inherited monotonic wall-clock deadline)!
+; Note: parent is I0 -> use I1 for timeout_ms!
 .func within_worker(i64 parent, ref inherited_ctx, ref budget_obj, ref body_fn)
     call core.init ()
-    ; Push new context map carrying budget reference
+    ; Apply wall-clock deadline quota (kind 6) if timeout_ms >= 0
+    bz.r budget_obj, 0f
+    bnisa budget_obj, core.AilBudget, 0f
+    mov I1, budget_obj->core.AilBudget.timeout_ms
+    blt I1, 0, 0f
+    quota 6, I1
+0:  ; Push new context map carrying budget reference
     mnew R4
     bz.r inherited_ctx, 1f
     mset R4, "parent", inherited_ctx
@@ -79,20 +87,12 @@ failed:
 .endf
 
 ; run_within(budget_obj, body_fn) -> ref
-; Runs body_fn inside an isolated spawnm scope process with timeout enforcement.
+; Runs body_fn inside an isolated spawnm scope process enforcing MLWSVM quota 6.
+; Per R2 agreement: waits directly on recv (no recvt), reading E_QUOTA in Down as BudgetExceeded!
 .func run_within(ref budget_obj, ref body_fn) -> ref
     mov R2, @ail_ctx
-    mov I0, -1
-    bz.r budget_obj, 1f
-    bnisa budget_obj, core.AilBudget, 1f
-    mov I0, budget_obj->core.AilBudget.timeout_ms
-1:  spawnm within_worker (PID, R2, budget_obj, body_fn) -> (I1)
-    blt I0, 0, wait_forever
-    recvt R3, I0, timed_out
-    jmp got_msg
-wait_forever:
+    spawnm within_worker (PID, R2, budget_obj, body_fn) -> (I1)
     recv R3
-got_msg:
     bisa R3, Down, died_early
     ; Got [ok, val]; drain Down
     recv R4
@@ -102,16 +102,8 @@ got_msg:
     throw R5
 ok:
     ret R5
-timed_out:
-    kill I1
-    ; Drain either late reply or Down until we see Down
-drain:
-    recv R6
-    bnisa R6, Down, drain
-    call core.mk_exc ("BudgetExceeded", "within budget timeout exceeded") -> (R7)
-    throw R7
 died_early:
-    ; Check if E_QUOTA -> BudgetExceeded
+    ; E_QUOTA (including link kills after deadline!) -> BudgetExceeded
     mov R8, R3->Down.code
     bz.r R8, died_generic
     strcmp I3, R8, "E_QUOTA"

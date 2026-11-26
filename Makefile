@@ -2,7 +2,7 @@ CC      ?= cc
 CFLAGS  ?= -std=c11 -Wall -Wextra -Werror -O2 -g
 LDFLAGS ?=
 
-MLWSVM  ?= $(shell if [ -x ../mlws-vm/mlwsvm ]; then echo ../mlws-vm/mlwsvm; else command -v mlwsvm || echo mlwsvm; fi)
+MLWSVM  ?= $(shell if [ -x ../mlws-vm-next/mlwsvm ]; then echo ../mlws-vm-next/mlwsvm; elif [ -x ../mlws-vm/mlwsvm ]; then echo ../mlws-vm/mlwsvm; else command -v mlwsvm || echo mlwsvm; fi)
 
 SRCS := src/main.c src/util.c src/lexer.c src/ast.c src/parser.c src/sema.c src/codegen.c
 OBJS := $(patsubst src/%.c,build/%.o,$(SRCS))
@@ -26,6 +26,7 @@ test: ail
 test-ollama: ail
 	MLWSVM="$(MLWSVM)" ./ail run examples/agent_ollama.ail --env examples/ollama.ail.env
 	MLWSVM="$(MLWSVM)" ./ail run examples/flow_ollama.ail --env examples/ollama_v03.ail.env
+	MLWSVM="$(MLWSVM)" ./ail run examples/stream_ollama.ail --env examples/ollama_v03.ail.env
 
 check-examples: ail
 	@for f in examples/*.ail; do \

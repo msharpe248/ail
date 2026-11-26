@@ -403,7 +403,30 @@ start_srv:
     tostr R15, I10
     strcat R16, "ail a2a_agent '", name, "' listening on http://", R4, ":", R15, "\n"
     ncall "fs.write" (R14, R16)
+    ; Trap SIGINT, SIGTERM, SIGHUP for graceful shutdown & .ail.env reload (MLWSVM v0.30.0)
+    ncall "os.trap" ("SIGINT", PID)
+    ncall "os.trap" ("SIGTERM", PID)
+    ncall "os.trap" ("SIGHUP", PID)
     monitor I9
+a2a_wait:
     recv R17
+    bisa R17, Down, a2a_done
+    bnisa R17, Signal, a2a_wait
+    mov R18, R17->Signal.name
+    strcmp I11, R18, "SIGHUP"
+    bnz I11, a2a_shutdown
+    ncall "os.trap" ("SIGHUP", PID)
+    ncall "os.env" ("AIL_ENV_FILE") -> (R19)
+    bz.r R19, a2a_wait
+.try a2a_wait
+    ncall "env.load" (R19)
+.endtry
+    jmp a2a_wait
+a2a_shutdown:
+    strcat R19, "ail a2a_agent '", name, "' shutting down cleanly (", R18, ")\n"
+    ncall "fs.write" (R14, R19)
+    kill I9
+    ncall "os.exit" (0)
+a2a_done:
     ret
 .endf

@@ -44,6 +44,9 @@ pass "check examples/a2a_support.ail"
 $AIL check examples/flow_ollama.ail >/dev/null || fail "check flow_ollama.ail"
 pass "check examples/flow_ollama.ail"
 
+$AIL check examples/stream_ollama.ail >/dev/null || fail "check stream_ollama.ail"
+pass "check examples/stream_ollama.ail"
+
 if $AIL check tests/bad_unbounded_cycle.ail >/dev/null 2>&1; then
     fail "bad_unbounded_cycle.ail should have been rejected"
 else
@@ -147,6 +150,7 @@ agent_answer=Counted 4 words; contact [REDACTED]
 views=audit:8:compact:6
 summarized_n=3
 fork=orig:8:branch:9
+stream_tokens=5:match=true
 mcp_direct=5:readme=true
 EOF
 )
@@ -184,8 +188,8 @@ else
     fail "examples/flow_rag_demo.ail output mismatch"
 fi
 
-echo "=== 8. v0.3.0 Live A2A Agent Server (Agent Card + JSON-RPC tasks) ==="
-$AIL run examples/a2a_support.ail --env examples/flow_rag.ail.env -- --http 127.0.0.1:18766 >/dev/null 2>&1 &
+echo "=== 8. v0.3.0/v0.4.0 Live A2A Agent Server + Graceful SIGTERM (os.trap) ==="
+$AIL run examples/a2a_support.ail --env examples/flow_rag.ail.env -- --http 127.0.0.1:18766 2>/tmp/ail_a2a_stderr.log &
 A2A_PID=$!
 sleep 0.5
 A2A_CARD=$(curl -s http://127.0.0.1:18766/.well-known/agent.json || true)
@@ -195,12 +199,17 @@ A2A_SEND=$(curl -s -X POST http://127.0.0.1:18766/ \
 A2A_GET=$(curl -s -X POST http://127.0.0.1:18766/ \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":2,"method":"tasks/get","params":{"id":"t-100"}}' || true)
-kill $A2A_PID 2>/dev/null || true
-wait $A2A_PID 2>/dev/null || true
+kill -TERM $A2A_PID 2>/dev/null || true
+A2A_RC=0
+wait $A2A_PID || A2A_RC=$?
+A2A_LOG=$(cat /tmp/ail_a2a_stderr.log || true)
+rm -f /tmp/ail_a2a_stderr.log
 echo "$A2A_CARD" | grep -q '"name": "support-router"' || fail "a2a agent card ($A2A_CARD)"
 echo "$A2A_SEND" | grep -q 'Routed to BILLING queue' || fail "a2a message/send ($A2A_SEND)"
 echo "$A2A_GET" | grep -q '"id":"t-100"' || fail "a2a tasks/get ($A2A_GET)"
-pass "v0.3.0 A2A server end-to-end (Agent Card, message/send, tasks/get)"
+echo "$A2A_LOG" | grep -q 'shutting down cleanly (SIGTERM)' || fail "a2a os.trap SIGTERM ($A2A_LOG)"
+[ "$A2A_RC" -eq 0 ] || fail "a2a SIGTERM clean exit expected 0, got $A2A_RC"
+pass "A2A server end-to-end (Agent Card, message/send, tasks/get, os.trap SIGTERM exit 0)"
 
 echo "=== 9. Standalone executable bundle (ail bundle) ==="
 $AIL bundle examples/hello.ail -o build/hello_bin || fail "ail bundle"

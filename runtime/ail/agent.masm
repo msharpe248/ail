@@ -326,7 +326,7 @@ cm_l:
     jmp cm_l
 
 do_llm:
-    call llm.chat (R4, R26, R23, null) -> (R28)
+    call llm.chat (R4, R26, R23, opts) -> (R28)
     ; Track token budget
     mget.r R29, R28, "usage", null
     bz.r R29, chk_calls
@@ -537,7 +537,12 @@ no_model:
     mov R3, args[0]
     blt I0, 2, 1f
     mov R4, args[1]
-1:  call run_agent (self_v, R3, R4) -> (R5)
+1:  ; If a Ruby block was passed to Agent.run/stream, wire it as on_token!
+    bz.r block, 2f
+    bnz.r R4, 3f
+    mnew R4
+3:  mset R4, "on_token", block
+2:  call run_agent (self_v, R3, R4) -> (R5)
     ret R5
 .endf
 
@@ -546,6 +551,7 @@ no_model:
     call core.mk_class ("Agent", null) -> (R0)
     closure agent_run_method () -> (R1)
     call core.class_def_method (R0, "run", R1)
+    call core.class_def_method (R0, "stream", R1)
     mov @agent_cls, R0
     mov @inited, 1
 9:  ret

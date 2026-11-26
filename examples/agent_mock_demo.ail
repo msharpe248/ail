@@ -71,7 +71,14 @@ branch = ctx.fork
 branch.append(:user, "branch only")
 puts "fork=orig:#{ctx.view(:audit).size}:branch:#{branch.view(:audit).size}"
 
-# 4. Direct programmatic MCP client call
+# 4. Streaming token callback test (Agent.stream)
+stream_tokens = []
+s_ans = DemoAgent.stream("Stream test") do |tok|
+  stream_tokens.push(tok)
+end
+puts "stream_tokens=#{stream_tokens.size}:match=#{s_ans.include?("Counted 4 words")}"
+
+# 5. Direct programmatic MCP client call
 cl = MCP.connect(:repo_tools)
 wc = cl.call_tool(:word_count, { text: "one two three four five" })
 rd = cl.read_resource("repo://readme")

@@ -5,6 +5,7 @@
 #include "sema.h"
 #include "util.h"
 
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,7 +13,13 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#define AIL_VERSION "0.3.0"
+#define AIL_VERSION "0.4.0"
+
+static volatile pid_t g_child_pid = 0;
+
+static void forward_signal(int sig) {
+    if (g_child_pid > 0) kill(g_child_pid, sig);
+}
 
 static void usage(void) {
     fprintf(stderr,
@@ -35,6 +42,7 @@ static bool file_is_executable(const char *path) {
 static const char *find_mlwsvm(void) {
     const char *env = getenv("MLWSVM");
     if (env && env[0]) return env;
+    if (file_is_executable("../mlws-vm-next/mlwsvm")) return "../mlws-vm-next/mlwsvm";
     if (file_is_executable("../mlws-vm/mlwsvm")) return "../mlws-vm/mlwsvm";
     if (file_is_executable("./mlwsvm")) return "./mlwsvm";
     return "mlwsvm";
@@ -114,8 +122,18 @@ static int run_exec(char *const argv[]) {
         fprintf(stderr, "ail: failed to execute '%s'\n", argv[0]);
         _exit(127);
     }
+    g_child_pid = pid;
+    void (*old_int)(int)  = signal(SIGINT, forward_signal);
+    void (*old_term)(int) = signal(SIGTERM, forward_signal);
+    void (*old_hup)(int)  = signal(SIGHUP, forward_signal);
     int status = 0;
-    if (waitpid(pid, &status, 0) < 0) return 1;
+    while (waitpid(pid, &status, 0) < 0) {
+        /* retry if interrupted by forwarded signal */
+    }
+    g_child_pid = 0;
+    signal(SIGINT, old_int);
+    signal(SIGTERM, old_term);
+    signal(SIGHUP, old_hup);
     if (WIFEXITED(status)) return WEXITSTATUS(status);
     if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
     return 1;
@@ -220,6 +238,7 @@ int main(int argc, char **argv) {
         if (env_file) {
             vargv[k++] = "--env";
             vargv[k++] = (char *)env_file;
+            setenv("AIL_ENV_FILE", env_file, 1);
         }
         vargv[k++] = tmp_path;
         for (int i = prog_args_start; i < argc && k < 126; i++) {

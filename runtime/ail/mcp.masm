@@ -503,8 +503,31 @@ run_http:
     tostr R8, I11
     strcat R9, "ail mcp_server '", srv->McpServer.name, "' listening on http://", R2, ":", R8, "/mcp\n"
     ncall "fs.write" (R7, R9)
-    ; Wait until server process ends
+    ; Trap SIGINT, SIGTERM, SIGHUP for graceful shutdown and .ail.env hot reload (MLWSVM v0.30.0)
+    ncall "os.trap" ("SIGINT", PID)
+    ncall "os.trap" ("SIGTERM", PID)
+    ncall "os.trap" ("SIGHUP", PID)
     monitor I10
+http_wait:
     recv R10
+    bisa R10, Down, http_done
+    bnisa R10, Signal, http_wait
+    mov R11, R10->Signal.name
+    strcmp I12, R11, "SIGHUP"
+    bnz I12, http_shutdown
+    ; Re-trap SIGHUP and reload AIL_ENV_FILE if set
+    ncall "os.trap" ("SIGHUP", PID)
+    ncall "os.env" ("AIL_ENV_FILE") -> (R12)
+    bz.r R12, http_wait
+.try http_wait
+    ncall "env.load" (R12)
+.endtry
+    jmp http_wait
+http_shutdown:
+    strcat R12, "ail mcp_server '", srv->McpServer.name, "' shutting down cleanly (", R11, ")\n"
+    ncall "fs.write" (R7, R12)
+    kill I10
+    ncall "os.exit" (0)
+http_done:
     ret
 .endf

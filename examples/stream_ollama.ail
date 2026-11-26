@@ -1,0 +1,23 @@
+# examples/stream_ollama.ail — Live streaming token output from local Ollama
+# Uses MLWSVM v0.30.0 std.http streaming (http.open / http.read_chunk / http.close)
+# Run: ./ail run examples/stream_ollama.ail --env examples/ollama_v03.ail.env
+
+use llm: :local
+
+agent Streamer do
+  model  :local
+  limits max_turns: 2
+
+  system <<~PROMPT
+    Reply in one short sentence of 8 to 12 words.
+  PROMPT
+end
+
+chunks = 0
+print "streamed="
+full = Streamer.stream("Say hello from AIL streaming on MLWSVM.") do |tok|
+  chunks += 1
+  print tok
+end
+puts ""
+puts "chunks=#{chunks}:nonempty=#{!full.empty?}"

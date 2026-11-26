@@ -31,20 +31,21 @@ ret_def:
 .endf
 
 ; Safe i64 read from native JSON map
+; Note: def is I0 -> use I1/I2 as temporaries!
 .func jmap_i64(ref m, ref key, i64 def) -> i64
     bz.r m, ret_def
-    mhas I0, m, key
-    bz I0, ret_def
+    mhas I1, m, key
+    bz I1, ret_def
 .try try_flt
-    mget I1, m, key, def
-    ret I1
+    mget I2, m, key, def
+    ret I2
 .endtry
 try_flt:
     catch R9
 .try ret_def
     mget F1, m, key, 0.0
-    cvt.i64.f64 I1, F1
-    ret I1
+    cvt.i64.f64 I2, F1
+    ret I2
 .endtry
 ret_def:
     catch R9

@@ -46,27 +46,7 @@ w_loop:
     jmp w_loop
 
 norm_vec:
-    mov F1, 0.0
-    mov I8, 0
-n1:
-    bge I8, dim, n2
-    mov F2, R1[I8]
-    mul F3, F2, F2
-    add F1, F1, F3
-    inc I8
-    jmp n1
-n2:
-    ble F1, 0.0, done
-    sqrt F1, F1
-    mov I8, 0
-n3:
-    bge I8, dim, done
-    mov F2, R1[I8]
-    div F2, F2, F1
-    mov R1[I8], F2
-    inc I8
-    jmp n3
-done:
+    ncall "vec.normalize_into" (R1, R1)
     ret R1
 .endf
 
@@ -358,49 +338,64 @@ do_search:
     mget.r R10, R3, "__embedder__", null
     call embed_text (R10, R4) -> (R11)
 
-    ; Score matching rows into scored list of [score_f64, idx_i64]
+    ; Build i64 array of eligible row indices (handles both __cap__ > __rows__ AND metadata pre-filtering!)
     lnew R12
     mov I7, 0
 sc_l:
-    bge I7, I4, sc_sort
+    bge I7, I4, sc_run_topk
     mov R13, R9[I7]
     mget.r R14, R13, "meta", null
     call matches_filter (R14, R5) -> (I8)
     bz I8, sc_next
-    call score_row (R8, I5, I7, R11, I6) -> (F0)
-    lnew R15
-    lpush R15, F0, I7
-    lpush R12, R15
+    lpush R12, I7
 sc_next:
     inc I7
     jmp sc_l
 
-sc_sort:
-    closure cmp_hit_desc () -> (R16)
-    ncall "list.sort" (R12, R16)
-    ; Take top_k and wrap results as AIL Hash objects
-    lnew R17
+sc_run_topk:
     len I9, R12
+    bz I9, empty_res
+    anew.i64 R15, I9
+    mov I10, 0
+cp_idx:
+    bge I10, I9, call_vec_topk
+    mov I11, R12[I10]
+    mov R15[I10], I11
+    inc I10
+    jmp cp_idx
+
+call_vec_topk:
+    ; Map metric code -> MLWSVM vec.top_k metric string ("dot" | "cosine" | "l2")
+    mov R16, "cosine"
+    bnz I6, chk_m_l2
+    mov R16, "dot"
+    jmp do_vec_topk
+chk_m_l2:
+    bne I6, 2, do_vec_topk
+    mov R16, "l2"
+do_vec_topk:
+    ; Single vectorized C11 native batch top-K over flat N*dim f32 matrix!
+    ncall "vec.top_k" (R8, I5, R11, I0, R16, R15) -> (R18, R19)
+    lnew R17
+    len I12, R18
     mov I10, 0
 tk_l:
-    bge I10, I0, tk_done
-    bge I10, I9, tk_done
-    mov R18, R12[I10]
+    bge I10, I12, tk_done
+    mov I11, R18[I10]                 ; row index
+    mov F1, R19[I10]                  ; score
     inc I10
-    mov F1, R18[0]
-    mov I11, R18[1]
-    mov R19, R9[I11]
+    mov R21, R9[I11]                  ; doc map
     mnew R20
-    mget.r R21, R19, "id", ""
-    mget.r R22, R19, "text", ""
-    mset R20, "id", R21
-    mset R20, "text", R22
-    call core.mk_float (F1) -> (R23)
-    mset R20, "score", R23
-    mhas I12, R19, "meta"
-    bz I12, tk_push
-    mget.r R24, R19, "meta", null
-    mset R20, "meta", R24
+    mget.r R22, R21, "id", ""
+    mget.r R23, R21, "text", ""
+    mset R20, "id", R22
+    mset R20, "text", R23
+    call core.mk_float (F1) -> (R24)
+    mset R20, "score", R24
+    mhas I13, R21, "meta"
+    bz I13, tk_push
+    mget.r R25, R21, "meta", null
+    mset R20, "meta", R25
 tk_push:
     lpush R17, R20
     jmp tk_l
