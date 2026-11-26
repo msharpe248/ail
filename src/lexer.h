@@ -55,6 +55,7 @@ typedef enum {
     TOK_NOT,
 
     /* Top-level / statement-leading AIL keywords */
+    TOK_REQUIRE,
     TOK_USE,
     TOK_SCHEMA,
     TOK_TOOL,

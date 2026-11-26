@@ -1,0 +1,19 @@
+# examples/support_desk/tools.ail — Sandboxed support tools
+
+# Diamond require: both tools.ail and main.ail require ./schemas
+require "./schemas"
+
+tool :lookup_policy, "Return the official company support policy for a topic (billing, refunds, sla)." do
+  param :topic, String, "Policy topic name"
+  returns String
+  capabilities fs: :none, net: :none, run: :none
+
+  key = topic.downcase.chomp
+  if key == "billing" || key == "refunds"
+    "Duplicate charges are refunded automatically within 3 business days."
+  elsif key == "sla"
+    "Standard SLA is 24 hours; P1 incidents receive a 1 hour response."
+  else
+    "Escalate general policy questions to Tier 2 support."
+  end
+end

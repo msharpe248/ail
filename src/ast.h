@@ -179,6 +179,7 @@ typedef enum {
     ND_INCLUDE,
 
     /* First-class AIL constructs */
+    ND_REQUIRE,
     ND_USE,
     ND_SCHEMA,
     ND_TOOL,

@@ -1,0 +1,2 @@
+require "./bad_cycle_b"
+puts "a"

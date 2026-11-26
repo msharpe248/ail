@@ -1,0 +1,15 @@
+# examples/support_desk/schemas.ail — Shared domain schemas
+
+schema Ticket
+  field :id,       String,        "Unique ticket ID"
+  field :customer, String,        "Customer display name"
+  field :body,     String,        "Ticket message body"
+  field :tags,     Array[String] = []
+end
+
+schema Resolution
+  field :ticket_id, String, "Resolved ticket ID"
+  field :queue,     Enum[:billing, :technical, :account], "Assigned queue"
+  field :summary,   String, "Agent response summary"
+  field :escalated, Bool = false
+end

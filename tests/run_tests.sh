@@ -47,11 +47,30 @@ pass "check examples/flow_ollama.ail"
 $AIL check examples/stream_ollama.ail >/dev/null || fail "check stream_ollama.ail"
 pass "check examples/stream_ollama.ail"
 
+$AIL check examples/support_desk/main.ail >/dev/null || fail "check support_desk/main.ail"
+pass "check examples/support_desk/main.ail"
+
 if $AIL check tests/bad_unbounded_cycle.ail >/dev/null 2>&1; then
     fail "bad_unbounded_cycle.ail should have been rejected"
 else
     pass "reject unbounded flow cycle at compile time"
 fi
+
+if $AIL check tests/bad_cycle_a.ail >/dev/null 2>&1; then
+    fail "bad_cycle_a.ail should have been rejected"
+else
+    pass "reject circular require at compile time"
+fi
+
+VER=$($AIL version)
+[ "$VER" = "ail 0.5.0" ] || fail "expected 'ail 0.5.0', got '$VER'"
+pass "ail version reports 0.5.0"
+
+$AIL build examples/support_desk/main.ail -o /tmp/ail_test_desk.masm >/dev/null || fail "ail build support_desk"
+grep -q '\.debug_format core\.debug_format' /tmp/ail_test_desk.masm || fail "missing .debug_format directive"
+grep -q 'schemas\.ail' /tmp/ail_test_desk.masm || fail "missing .loc filename for required file"
+rm -f /tmp/ail_test_desk.masm
+pass "ail build emits .debug_format and multi-file .loc metadata"
 
 echo "=== 2. Core Ruby runtime (examples/hello.ail) ==="
 OUT=$($AIL run examples/hello.ail)
@@ -227,6 +246,31 @@ if [ "$BUNDLE_OUT" = "$EXPECTED_HELLO" ]; then
 else
     fail "ail bundle output mismatch"
 fi
+
+echo "=== 10. v0.5.0 Multi-file Support Desk app & expanded stdlib ==="
+DESK_OUT=$($AIL run examples/support_desk/main.ail --env examples/support_desk/mock.ail.env)
+DESK_EXPECTED=$(cat <<'EOF'
+ticket=T-2026-01:tags=billing,urgent
+resolution=T-2026-01:billing:esc=false
+reply=Refund initiated (3 business days). Ref [REDACTED-SSN].
+stdlib=g2:m20:99:hello AIL world:sqrttrue:max9:ttrue
+EOF
+)
+if [ "$DESK_OUT" = "$DESK_EXPECTED" ]; then
+    pass "v0.5.0 multi-file require + support_desk app + expanded stdlib"
+else
+    echo "Expected:"
+    echo "$DESK_EXPECTED"
+    echo "Got:"
+    echo "$DESK_OUT"
+    fail "examples/support_desk/main.ail output mismatch"
+fi
+
+echo "=== 11. v0.5.0 Interactive REPL (ail repl) ==="
+REPL_OUT=$(printf 'x = 21\nx * 2\n[3, 1, 2, 1].uniq.sort\n:quit\n' | $AIL repl)
+echo "$REPL_OUT" | grep -q '=> 42' || fail "repl arithmetic ($REPL_OUT)"
+echo "$REPL_OUT" | grep -q '=> \[1, 2, 3\]' || fail "repl stdlib inspect ($REPL_OUT)"
+pass "ail repl evaluates expressions, persists state, and formats via .inspect"
 
 echo ""
 echo "All $PASS tests passed!"

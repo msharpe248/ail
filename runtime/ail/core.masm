@@ -17,7 +17,7 @@
 .export op_eq, op_neq, op_lt, op_le, op_gt, op_ge, op_match, op_nmatch
 .export index_get, index_set, attr_get, attr_set
 .export send_msg, call_val, invoke_tool_with_caps, builtin_call, build_caps_map
-.export env_new, env_def, env_set, env_get, has_builtin
+.export env_new, env_def, env_set, env_get, has_builtin, inspect_str, debug_format
 
 ; ---- Core structs ----
 
@@ -1360,8 +1360,13 @@ wd_done:
 .func send_msg(ref recv, ref name, ref args, ref block) -> ref
     ; Universal methods
     strcmp I0, name, "to_s"
-    bnz I0, chk_nil
+    bnz I0, chk_insp
     call to_str (recv) -> (R4)
+    ret R4
+chk_insp:
+    strcmp I0, name, "inspect"
+    bnz I0, chk_nil
+    call inspect_str (recv) -> (R4)
     ret R4
 chk_nil:
     strcmp I0, name, "nil?"
@@ -1950,10 +1955,54 @@ mstr_toi:
     ret R4
 mstr_tof:
     strcmp I1, name, "to_f"
-    bnz I1, no_method
+    bnz I1, mstr_chomp
     parse.f64 F0, recv
     call mk_float (F0) -> (R4)
     ret R4
+mstr_chomp:
+    strcmp I1, name, "chomp"
+    bnz I1, mstr_chars
+    ncall "text.ends_with" (recv, "\r\n") -> (I2)
+    bz I2, mstr_ch_lf
+    len I3, recv
+    sub I3, I3, 2
+    substr R4, recv, 0, I3
+    ret R4
+mstr_ch_lf:
+    ncall "text.ends_with" (recv, "\n") -> (I2)
+    bz I2, mstr_ch_same
+    len I3, recv
+    sub I3, I3, 1
+    substr R4, recv, 0, I3
+    ret R4
+mstr_ch_same:
+    ret recv
+mstr_chars:
+    strcmp I1, name, "chars"
+    bnz I1, mstr_slice
+    ncall "text.graphemes" (recv) -> (R4)
+    ret R4
+mstr_slice:
+    strcmp I1, name, "slice"
+    bnz I1, mstr_sub
+    call to_i64 (args[0]) -> (I2)
+    call to_i64 (args[1]) -> (I3)
+    add I4, I2, I3
+    ncall "text.slice" (recv, I2, I4) -> (R4)
+    ret R4
+mstr_sub:
+    strcmp I1, name, "sub"
+    bnz I1, no_method
+    mov R4, args[0]
+    call to_str (args[1]) -> (R5)
+    bisa R4, AilRegex, mstr_sre
+    call to_str (R4) -> (R6)
+    ncall "text.replace_n" (recv, R6, R5, 1) -> (R7, I2)
+    ret R7
+mstr_sre:
+    ncall "regex.compile" (R4->AilRegex.pattern, R4->AilRegex.flags) -> (R6)
+    ncall "regex.replace" (R6, recv, R5, 1) -> (R7, I2)
+    ret R7
 
 ; -- Array (list) methods & Enumerable internal iterators --
 m_list:
@@ -2303,7 +2352,7 @@ ml_all_f:
     ret R7
 ml_find:
     strcmp I1, name, "find"
-    bnz I1, no_method
+    bnz I1, ml_compact
     len I2, recv
     mov I3, 0
 ml_fndl:
@@ -2317,6 +2366,111 @@ ml_fndl:
     inc I3
     jmp ml_fndl
 ml_fnd_ok:
+    ret R4
+ml_compact:
+    strcmp I1, name, "compact"
+    bnz I1, ml_uniq
+    lnew R4
+    len I2, recv
+    mov I3, 0
+ml_cmpl:
+    bge I3, I2, ml_cmpd
+    mov R5, recv[I3]
+    inc I3
+    bz.r R5, ml_cmpl
+    lpush R4, R5
+    jmp ml_cmpl
+ml_cmpd:
+    ret R4
+ml_uniq:
+    strcmp I1, name, "uniq"
+    bnz I1, ml_flat
+    lnew R4
+    len I2, recv
+    mov I3, 0
+ml_uql:
+    bge I3, I2, ml_uqd
+    mov R5, recv[I3]
+    inc I3
+    len I4, R4
+    mov I5, 0
+ml_uq_chk:
+    bge I5, I4, ml_uq_add
+    mov R6, R4[I5]
+    call eq_raw (R5, R6) -> (I6)
+    bnz I6, ml_uql
+    inc I5
+    jmp ml_uq_chk
+ml_uq_add:
+    lpush R4, R5
+    jmp ml_uql
+ml_uqd:
+    ret R4
+ml_flat:
+    strcmp I1, name, "flatten"
+    bnz I1, ml_sort
+    lnew R4
+    len I2, recv
+    mov I3, 0
+ml_fll:
+    bge I3, I2, ml_fld
+    mov R5, recv[I3]
+    inc I3
+    bz.r R5, ml_fl_one
+    typeof I4, R5
+    bne I4, 5, ml_fl_one
+    len I5, R5
+    mov I6, 0
+ml_fli:
+    bge I6, I5, ml_fll
+    mov R6, R5[I6]
+    lpush R4, R6
+    inc I6
+    jmp ml_fli
+ml_fl_one:
+    lpush R4, R5
+    jmp ml_fll
+ml_fld:
+    ret R4
+ml_sort:
+    strcmp I1, name, "sort"
+    bnz I1, ml_group
+    lnew R4
+    len I2, recv
+    mov I3, 0
+ml_scp:
+    bge I3, I2, ml_sgo
+    mov R5, recv[I3]
+    lpush R4, R5
+    inc I3
+    jmp ml_scp
+ml_sgo:
+    closure cmp_ail_asc () -> (R6)
+    ncall "list.sort" (R4, R6)
+    ret R4
+ml_group:
+    strcmp I1, name, "group_by"
+    bnz I1, no_method
+    mnew R4
+    len I2, recv
+    mov I3, 0
+ml_gbl:
+    bge I3, I2, ml_gbd
+    mov R5, recv[I3]
+    inc I3
+    lnew R6
+    lpush R6, R5
+    call call_val (block, R6, null) -> (R7)
+    call to_str (R7) -> (R8)
+    mhas I4, R4, R8
+    bnz I4, ml_gb_add
+    lnew R9
+    mset R4, R8, R9
+ml_gb_add:
+    mget.r R9, R4, R8, null
+    lpush R9, R5
+    jmp ml_gbl
+ml_gbd:
     ret R4
 
 ; -- Hash (map) methods --
@@ -2371,7 +2525,7 @@ mm_hgo:
     ret R5
 mm_each:
     strcmp I1, name, "each"
-    bnz I1, mm_field
+    bnz I1, mm_fetch
     mkeys R4, recv
     len I2, R4
     mov I3, 0
@@ -2386,6 +2540,36 @@ mm_el:
     jmp mm_el
 mm_ed:
     ret recv
+mm_fetch:
+    strcmp I1, name, "fetch"
+    bnz I1, mm_del
+    call to_str (args[0]) -> (R4)
+    mhas I2, recv, R4
+    bnz I2, mm_fgot
+    len I3, args
+    blt I3, 2, mm_fmiss
+    mov R5, args[1]
+    ret R5
+mm_fgot:
+    mget.r R5, recv, R4, null
+    ret R5
+mm_fmiss:
+    strcat R5, "key not found: ", R4
+    call mk_exc ("KeyError", R5) -> (R6)
+    throw R6
+mm_del:
+    strcmp I1, name, "delete"
+    bnz I1, mm_merge
+    call to_str (args[0]) -> (R4)
+    mget.r R5, recv, R4, null
+    mdel recv, R4
+    ret R5
+mm_merge:
+    strcmp I1, name, "merge"
+    bnz I1, mm_field
+    mov R4, args[0]
+    ncall "map.union" (recv, R4) -> (R5)
+    ret R5
 mm_field:
     ; Allow dot-access on hash keys (e.g. msg.text or d.queue)
     mhas I2, recv, name
@@ -2619,7 +2803,7 @@ b_cfg_load:
 
 b_ctx_new:
     strcmp I0, name, "Context.new"
-    bnz I0, b_unknown
+    bnz I0, b_env_get
     mov R3, null
     len I1, args
     bz I1, bcn_go
@@ -2627,6 +2811,97 @@ b_ctx_new:
 bcn_go:
     call mk_context (R3) -> (R4)
     ret R4
+
+b_env_get:
+    strcmp I0, name, "Env.get"
+    bnz I0, b_env_has
+    call to_str (args[0]) -> (R3)
+    ncall "os.env" (R3) -> (R4)
+    bnz.r R4, 1f
+    len I1, args
+    blt I1, 2, 1f
+    mov R4, args[1]
+1:  ret R4
+
+b_env_has:
+    strcmp I0, name, "Env.has?"
+    bnz I0, b_time_now
+    call to_str (args[0]) -> (R3)
+    ncall "os.env" (R3) -> (R4)
+    sne.r I1, R4, null
+    call mk_bool (I1) -> (R5)
+    ret R5
+
+b_time_now:
+    strcmp I0, name, "Time.now"
+    bnz I0, b_time_ms
+    ncall "time.now" -> (I1)
+    ncall "time.format" (I1, 0) -> (R3)
+    ret R3
+
+b_time_ms:
+    strcmp I0, name, "Time.now_ms"
+    bnz I0, b_math_sqrt
+    ncall "time.monotonic" -> (I1)
+    div I1, I1, 1000000
+    call mk_int (I1) -> (R3)
+    ret R3
+
+b_math_sqrt:
+    strcmp I0, name, "Math.sqrt"
+    bnz I0, b_math_pow
+    call to_f64 (args[0]) -> (F0)
+    sqrt F0, F0
+    call mk_float (F0) -> (R3)
+    ret R3
+
+b_math_pow:
+    strcmp I0, name, "Math.pow"
+    bnz I0, b_math_min
+    call to_f64 (args[0]) -> (F0)
+    call to_f64 (args[1]) -> (F1)
+    ncall "math.pow" (F0, F1) -> (F2)
+    call mk_float (F2) -> (R3)
+    ret R3
+
+b_math_min:
+    strcmp I0, name, "Math.min"
+    bnz I0, b_math_max
+    call cmp_raw (args[0], args[1]) -> (I1)
+    ble I1, 0, 1f
+    ret args[1]
+1:  ret args[0]
+
+b_math_max:
+    strcmp I0, name, "Math.max"
+    bnz I0, b_rand_int
+    call cmp_raw (args[0], args[1]) -> (I1)
+    bge I1, 0, 1f
+    ret args[1]
+1:  ret args[0]
+
+b_rand_int:
+    strcmp I0, name, "Random.int"
+    bnz I0, b_rand_flt
+    call to_i64 (args[0]) -> (I1)
+    call to_i64 (args[1]) -> (I2)
+    ncall "random.int" (I1, I2) -> (I3)
+    call mk_int (I3) -> (R3)
+    ret R3
+
+b_rand_flt:
+    strcmp I0, name, "Random.float"
+    bnz I0, b_rand_seed
+    ncall "random.float" -> (F0)
+    call mk_float (F0) -> (R3)
+    ret R3
+
+b_rand_seed:
+    strcmp I0, name, "Random.seed"
+    bnz I0, b_unknown
+    call to_i64 (args[0]) -> (I1)
+    ncall "random.seed" (I1)
+    ret null
 
 b_unknown:
     strcat R3, "undefined function '", name, "'"
@@ -2704,4 +2979,59 @@ es_local:
     ret 0
 hb_y:
     ret 1
+.endf
+
+; ---- Comparator for Array.sort ----
+.func cmp_ail_asc(ref a, ref b) -> i64
+    call cmp_raw (a, b) -> (I0)
+    ret I0
+.endf
+
+; ---- Ruby-style inspect & MLWSVM .debug_format ----
+
+.func inspect_str(ref v) -> ref
+    bz.r v, i_nil
+    typeof I0, v
+    beq I0, 1, i_str
+    beq I0, 9, i_dec
+    beq I0, 5, i_list
+    bisa v, AilSym, i_sym
+    call to_str (v) -> (R1)
+    ret R1
+i_nil:
+    ret "nil"
+i_str:
+    strcat R1, "\"", v, "\""
+    ret R1
+i_dec:
+    tostr R1, v
+    strcat R2, R1, "d"
+    ret R2
+i_sym:
+    strcat R1, ":", v->AilSym.name
+    ret R1
+i_list:
+    bufnew R1, 0
+    bufcat R1, "["
+    len I1, v
+    mov I2, 0
+il_l:
+    bge I2, I1, il_d
+    bz I2, il_nc
+    bufcat R1, ", "
+il_nc:
+    mov R2, v[I2]
+    call inspect_str (R2) -> (R3)
+    bufcat R1, R3
+    inc I2
+    jmp il_l
+il_d:
+    bufcat R1, "]"
+    strcat R4, R1
+    ret R4
+.endf
+
+.func debug_format(ref v) -> ref
+    call inspect_str (v) -> (R1)
+    ret R1
 .endf

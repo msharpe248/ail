@@ -81,7 +81,8 @@ static TokKind lookup_keyword(const char *s, size_t n) {
         {"next", TOK_NEXT}, {"yield", TOK_YIELD}, {"self", TOK_SELF},
         {"nil", TOK_NIL}, {"true", TOK_TRUE}, {"false", TOK_FALSE},
         {"and", TOK_AND}, {"or", TOK_OR}, {"not", TOK_NOT},
-        {"use", TOK_USE}, {"schema", TOK_SCHEMA}, {"tool", TOK_TOOL},
+        {"use", TOK_USE}, {"require", TOK_REQUIRE}, {"require_relative", TOK_REQUIRE},
+        {"schema", TOK_SCHEMA}, {"tool", TOK_TOOL},
         {"guard", TOK_GUARD}, {"skill", TOK_SKILL}, {"decide", TOK_DECIDE},
         {"agent", TOK_AGENT}, {"flow", TOK_FLOW}, {"within", TOK_WITHIN},
         {"retry_up_to", TOK_RETRY_UP_TO}, {"mcp_server", TOK_MCP_SERVER},
@@ -655,6 +656,7 @@ const char *tok_kind_name(TokKind k) {
         case TOK_NEXT: return "'next'";
         case TOK_YIELD: return "'yield'";
         case TOK_USE: return "'use'";
+        case TOK_REQUIRE: return "'require'";
         case TOK_SCHEMA: return "'schema'";
         case TOK_TOOL: return "'tool'";
         case TOK_GUARD: return "'guard'";

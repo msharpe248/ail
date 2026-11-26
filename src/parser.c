@@ -1314,6 +1314,20 @@ static Node *parse_stmt(Parser *p) {
     Node *st = NULL;
 
     switch (cur(p)->kind) {
+        case TOK_REQUIRE: {
+            bump(p);
+            bool has_p = eat(p, TOK_LPAREN);
+            st = node_new(p->arena, ND_REQUIRE, sp);
+            if (at(p, TOK_STRING)) {
+                st->u.str.text = bump(p)->text;
+                st->u.str.len = strlen(st->u.str.text);
+            } else {
+                diag_error(p->diags, cur(p)->span, "expected file path string after 'require'");
+                st->u.str.text = "";
+            }
+            if (has_p) expect(p, TOK_RPAREN, "')'");
+            return st;
+        }
         case TOK_USE:        return parse_use_decl(p);
         case TOK_SCHEMA:     return parse_schema_decl(p);
         case TOK_TOOL:       return parse_tool_decl(p);

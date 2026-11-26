@@ -1,0 +1,110 @@
+# examples/support_desk/main.ail — Worked multi-file AIL v0.5.0 application
+# Demonstrates: multi-file `require` (including diamond deduplication), schemas,
+# sandboxed tools, guards, Knowledge RAG, System 1 `decide`, stateful `flow`,
+# autonomous `agent`, multi-view `Context`, and v0.5.0 standard library helpers.
+
+require "./schemas"
+require "./guards"
+require "./tools"
+
+use s1:        :router
+use llm:       :agent_model
+use embedder:  :docs
+use vector_db: :kb
+
+# 1. Seed the Knowledge base for RAG retrieval
+kb = Knowledge.new(vector_db: :kb)
+kb.ingest("kb_refund",  "Duplicate invoice charges are refunded within 3 business days", { topic: "billing" })
+kb.ingest("kb_reset",   "Password reset links expire after 15 minutes",                  { topic: "account" })
+kb.ingest("kb_timeout", "Increase timeout_ms in .ail.env for slow local model endpoints",{ topic: "technical" })
+
+# 2. Define the support desk agent backed by our sandboxed tool & PII guard
+agent DeskAgent do
+  model  :agent_model
+  tools  [lookup_policy]
+  guards [PIIGuard]
+  limits max_turns: 5, tokens: 4000
+
+  system <<~PROMPT
+    You are a concise support agent. Use lookup_policy before answering billing questions.
+  PROMPT
+end
+
+# 3. Define stateful triage & resolution flow
+def intake(s)
+  s
+end
+
+def handle_billing(s)
+  s["queue"] = :billing
+  hits = s["kb"].search(s["body"], top_k: 1, filter: { topic: "billing" })
+  s["kb_hit"] = hits[0]["id"]
+  s
+end
+
+def handle_technical(s)
+  s["queue"] = :technical
+  s["kb_hit"] = "none"
+  s
+end
+
+def escalate_tier2(s)
+  s["queue"] = :account
+  s["escalated"] = true
+  s["kb_hit"] = "none"
+  s
+end
+
+def respond(s)
+  ctx = Context.new
+  ctx.attach(:knowledge, [s["kb_hit"]])
+  reply = DeskAgent.run("Ticket #{s["ticket_id"]}: #{s["body"]}", context: ctx)
+  Resolution.new(
+    ticket_id: s["ticket_id"],
+    queue:     s["queue"],
+    summary:   reply,
+    escalated: s["escalated"]
+  )
+end
+
+flow SupportDeskFlow
+  start :intake
+  node  :intake --> :classify
+
+  decide :classify, using: :router do
+    choice :queue, [:billing, :technical, :account]
+    score  :urgency, 1..5
+  end
+
+  edge :classify         --> :handle_billing,   when: ->(d) { d.queue == :billing   && d.queue.confidence >= 0.85 }
+  edge :classify         --> :handle_technical, when: ->(d) { d.queue == :technical && d.queue.confidence >= 0.85 }
+  edge :classify         --> :escalate_tier2
+  edge :handle_billing   --> :respond
+  edge :handle_technical --> :respond
+  edge :escalate_tier2   --> :respond
+end
+
+# 4. Run a validated ticket through the pipeline
+ticket = Ticket.new(
+  id:       "T-2026-01",
+  customer: "Ada Lovelace",
+  body:     "Charged twice on invoice #881!\n".chomp,
+  tags:     ["billing", "urgent", "billing", nil].compact.uniq.sort
+)
+
+res = SupportDeskFlow.run({
+  ticket_id: ticket.id,
+  body:      ticket.body,
+  kb:        kb,
+  escalated: false
+})
+
+puts "ticket=#{ticket.id}:tags=#{ticket.tags.join(",")}"
+puts "resolution=#{res.ticket_id}:#{res.queue}:esc=#{res.escalated}"
+puts "reply=#{res.summary}"
+
+# 5. Exercise v0.5.0 stdlib helpers
+grouped = ["billing", "bug", "billing", "ops"].group_by { |t| t.size }
+merged  = { a: 1, b: 2 }.merge({ b: 20, c: 30 })
+clean   = "hello world world".sub("world", "AIL")
+puts "stdlib=g#{grouped[7].size}:m#{merged.fetch(:b, 0)}:#{merged.fetch(:missing, 99)}:#{clean}:sqrt#{Math.sqrt(9) == 3.0}:max#{Math.max(4, 9)}:t#{Time.now_ms > 0}"
