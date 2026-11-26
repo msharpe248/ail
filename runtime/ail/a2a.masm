@@ -1,0 +1,409 @@
+; ail.a2a - Live A2A (Agent-to-Agent) HTTP Server
+; Auto-serves /.well-known/agent.json (Agent Card), /health, and JSON-RPC 2.0
+; endpoints (message/send, tasks/send, tasks/get, tasks/cancel) via std.http.
+
+.module ail.a2a
+.import ail.core as core
+.import std.http as http
+.export serve
+
+.struct A2aServer
+    name: ref
+    version: ref
+    description: ref
+    handler: ref      ; Agent, Flow, Tool, or Closure
+    tasks_pid: i64    ; actor process holding task store
+.ends
+
+; ---- Task store actor (safe shared state across concurrent HTTP connection processes!) ----
+
+.func task_store_loop
+    mnew R0                           ; map: task_id -> task_json_map
+    mov I0, 0                         ; seq counter
+loop:
+    recv R1
+    bnisa R1, Call, loop
+    mov R2, R1->Call.body             ; ["put", id_or_null, task_map] | ["get", id] | ["cancel", id]
+    mov R3, R2[0]
+    strcmp I1, R3, "put"
+    bnz I1, chk_get
+    mov R4, R2[1]
+    mov R5, R2[2]
+    bnz.r R4, 1f
+    inc I0
+    tostr R6, I0
+    strcat R4, "task-", R6
+1:  mset R5, "id", R4
+    mset R0, R4, R5
+    ncall "proc.reply" (R1, R5)
+    jmp loop
+chk_get:
+    strcmp I1, R3, "get"
+    bnz I1, chk_cancel
+    mov R4, R2[1]
+    mget.r R5, R0, R4, null
+    ncall "proc.reply" (R1, R5)
+    jmp loop
+chk_cancel:
+    mov R4, R2[1]
+    mhas I2, R0, R4
+    bz I2, no_task
+    mget.r R5, R0, R4, null
+    mnew R6
+    mset R6, "state", "canceled"
+    mset R5, "status", R6
+    mset R0, R4, R5
+    ncall "proc.reply" (R1, R5)
+    jmp loop
+no_task:
+    mov R7, null
+    ncall "proc.reply" (R1, R7)
+    jmp loop
+.endf
+
+; ---- Build Agent Card JSON string ----
+
+.func build_agent_card(ref srv, ref base_url) -> ref
+    mnew R2
+    mset R2, "name", srv->A2aServer.name
+    mset R2, "description", srv->A2aServer.description
+    mset R2, "version", srv->A2aServer.version
+    mset R2, "url", base_url
+    ncall "json.parse" ("{\"streaming\":false,\"pushNotifications\":false}") -> (R3)
+    mset R2, "capabilities", R3
+    lnew R4
+    lpush R4, "text/plain"
+    mset R2, "defaultInputModes", R4
+    lnew R5
+    lpush R5, "text/plain"
+    mset R2, "defaultOutputModes", R5
+    lnew R6
+    mnew R7
+    mset R7, "id", srv->A2aServer.name
+    mset R7, "name", srv->A2aServer.name
+    mset R7, "description", srv->A2aServer.description
+    lpush R6, R7
+    mset R2, "skills", R6
+    ncall "json.stringify" (R2, 2) -> (R8)
+    ret R8
+.endf
+
+; Extract concatenated text from A2A params.message.parts
+.func extract_message_text(ref params) -> ref
+    bz.r params, empty
+    mget.r R1, params, "message", null
+    bz.r R1, empty
+    mget.r R2, R1, "parts", null
+    bz.r R2, empty
+    bufnew R3, 0
+    len I0, R2
+    mov I1, 0
+1:  bge I1, I0, 2f
+    mov R4, R2[I1]
+    inc I1
+    mget.r R5, R4, "text", null
+    bz.r R5, 1b
+    len I2, R3
+    bz I2, 3f
+    bufcat R3, "\n"
+3:  bufcat R3, R5
+    jmp 1b
+2:  strcat R6, R3
+    ret R6
+empty:
+    ret ""
+.endf
+
+; Invoke the configured A2A handler (Agent, Flow, Tool, or Closure)
+.func invoke_a2a_handler(ref handler, ref input_text) -> ref
+    bz.r handler, ret_echo
+    bnisa handler, core.AilObj, try_call
+    lnew R2
+    lpush R2, input_text
+    call core.send_msg (handler, "run", R2, null) -> (R3)
+    call core.to_str (R3) -> (R4)
+    ret R4
+try_call:
+    lnew R2
+    lpush R2, input_text
+    call core.call_val (handler, R2, null) -> (R3)
+    call core.to_str (R3) -> (R4)
+    ret R4
+ret_echo:
+    ret input_text
+.endf
+
+; Extract JSON-RPC id preserving tag
+.func extract_id(ref req) -> ref
+    mhas I0, req, "id"
+    bz I0, none
+    lnew R1
+.try as_int
+    mget.r R2, req, "id", null
+    lpush R1, R2
+    ret R1
+.endtry
+as_int:
+    catch R9
+    mget I1, req, "id", 0
+    lpush R1, I1
+    ret R1
+none:
+    ret null
+.endf
+
+.func set_rpc_id(ref resp, ref id_list)
+    bz.r id_list, set_null
+    len I0, id_list
+    bz I0, set_null
+    tagof I1, id_list[0]
+    beq I1, 6, set_i
+    mov R2, id_list[0]
+    mset resp, "id", R2
+    ret
+set_i:
+    mov I2, id_list[0]
+    mset resp, "id", I2
+    ret
+set_null:
+    mov R2, null
+    mset resp, "id", R2
+    ret
+.endf
+
+; ---- HTTP handler closure: UP[0] = A2aServer, UP[1] = base_url ----
+
+.func a2a_http_handler(ref req) -> ref
+    call core.init ()
+    mov R1, UP[0]                     ; A2aServer
+    mov R2, UP[1]                     ; base_url
+    mget.r R3, req, "method", ""
+    mget.r R4, req, "path", ""
+
+    strcmp I0, R3, "GET"
+    bnz I0, chk_post
+
+    ; GET /health
+    strcmp I1, R4, "/health"
+    bnz I1, chk_card
+    mnew R5
+    mset R5, "status", 200
+    mnew R6
+    mset R6, "Content-Type", "application/json"
+    mset R5, "headers", R6
+    strcat R7, "{\"status\":\"ok\",\"agent\":\"", R1->A2aServer.name, "\"}"
+    mset R5, "body", R7
+    ret R5
+
+chk_card:
+    strcmp I1, R4, "/.well-known/agent.json"
+    bz I1, serve_card
+    strcmp I1, R4, "/.well-known/agent-card.json"
+    bnz I1, not_found
+serve_card:
+    call build_agent_card (R1, R2) -> (R7)
+    mnew R5
+    mset R5, "status", 200
+    mnew R6
+    mset R6, "Content-Type", "application/json"
+    mset R5, "headers", R6
+    mset R5, "body", R7
+    ret R5
+
+chk_post:
+    strcmp I0, R3, "POST"
+    bnz I0, not_found
+    mget.r R8, req, "body", ""
+.try bad_json
+    ncall "json.parse" (R8) -> (R9)
+.endtry
+    call extract_id (R9) -> (R10)
+    mget.r R11, R9, "method", ""
+    mget.r R12, R9, "params", null
+
+    ; message/send or tasks/send
+    strcmp I2, R11, "message/send"
+    bz I2, do_send
+    strcmp I2, R11, "tasks/send"
+    bnz I2, chk_get_task
+
+do_send:
+    call extract_message_text (R12) -> (R13)
+    mov R14, null
+    bz.r R12, 1f
+    mget.r R14, R12, "id", null
+1:
+.try task_failed
+    call invoke_a2a_handler (R1->A2aServer.handler, R13) -> (R15)
+.endtry
+    ; Build completed Task object
+    mnew R16
+    mnew R17
+    mset R17, "state", "completed"
+    mnew R18
+    mset R18, "role", "agent"
+    lnew R19
+    mnew R20
+    mset R20, "type", "text"
+    mset R20, "text", R15
+    lpush R19, R20
+    mset R18, "parts", R19
+    mset R17, "message", R18
+    mset R16, "status", R17
+    jmp store_task
+
+task_failed:
+    catch R21
+    call core.exc_message (R21) -> (R15)
+    mnew R16
+    mnew R17
+    mset R17, "state", "failed"
+    mnew R18
+    mset R18, "role", "agent"
+    lnew R19
+    mnew R20
+    mset R20, "type", "text"
+    mset R20, "text", R15
+    lpush R19, R20
+    mset R18, "parts", R19
+    mset R17, "message", R18
+    mset R16, "status", R17
+
+store_task:
+    lnew R22
+    lpush R22, "put", R14, R16
+    ncall "proc.call" (R1->A2aServer.tasks_pid, R22, 5000) -> (R23)
+    mnew R24
+    mset R24, "jsonrpc", "2.0"
+    call set_rpc_id (R24, R10)
+    mset R24, "result", R23
+    ncall "json.stringify" (R24, 0) -> (R25)
+    jmp ret_json
+
+chk_get_task:
+    strcmp I2, R11, "tasks/get"
+    bnz I2, chk_cancel_task
+    mget.r R14, R12, "id", ""
+    lnew R22
+    lpush R22, "get", R14
+    ncall "proc.call" (R1->A2aServer.tasks_pid, R22, 5000) -> (R23)
+    bz.r R23, task_not_found
+    mnew R24
+    mset R24, "jsonrpc", "2.0"
+    call set_rpc_id (R24, R10)
+    mset R24, "result", R23
+    ncall "json.stringify" (R24, 0) -> (R25)
+    jmp ret_json
+
+chk_cancel_task:
+    strcmp I2, R11, "tasks/cancel"
+    bnz I2, unknown_method
+    mget.r R14, R12, "id", ""
+    lnew R22
+    lpush R22, "cancel", R14
+    ncall "proc.call" (R1->A2aServer.tasks_pid, R22, 5000) -> (R23)
+    bz.r R23, task_not_found
+    mnew R24
+    mset R24, "jsonrpc", "2.0"
+    call set_rpc_id (R24, R10)
+    mset R24, "result", R23
+    ncall "json.stringify" (R24, 0) -> (R25)
+    jmp ret_json
+
+task_not_found:
+    mnew R24
+    mset R24, "jsonrpc", "2.0"
+    call set_rpc_id (R24, R10)
+    mnew R26
+    mset R26, "code", -32001
+    mset R26, "message", "Task not found"
+    mset R24, "error", R26
+    ncall "json.stringify" (R24, 0) -> (R25)
+    jmp ret_json
+
+unknown_method:
+    mnew R24
+    mset R24, "jsonrpc", "2.0"
+    call set_rpc_id (R24, R10)
+    mnew R26
+    mset R26, "code", -32601
+    strcat R27, "Method not found: ", R11
+    mset R26, "message", R27
+    mset R24, "error", R26
+    ncall "json.stringify" (R24, 0) -> (R25)
+    jmp ret_json
+
+bad_json:
+    catch R28
+    mov R25, "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"Parse error\"}}"
+
+ret_json:
+    mnew R5
+    mset R5, "status", 200
+    mnew R6
+    mset R6, "Content-Type", "application/json"
+    mset R5, "headers", R6
+    mset R5, "body", R25
+    ret R5
+
+not_found:
+    mnew R5
+    mset R5, "status", 404
+    mset R5, "body", "Not Found\n"
+    ret R5
+.endf
+
+; ---- Public entrypoint: serve(name, version, description, handler) ----
+; Reads `--http host:port` from os.args (default 127.0.0.1:9000)
+
+.func serve(ref name, ref version, ref desc, ref handler)
+    mov R4, "127.0.0.1"
+    mov I0, 9000
+    ncall "os.args" -> (R5)
+    len I1, R5
+    mov I2, 0
+arg_l:
+    bge I2, I1, start_srv
+    mov R6, R5[I2]
+    inc I2
+    strcmp I3, R6, "--http"
+    bnz I3, arg_l
+    bge I2, I1, start_srv
+    mov R7, R5[I2]
+    inc I2
+    ncall "text.find" (R7, ":", 0) -> (I4)
+    blt I4, 0, port_only
+    len I5, R7
+    add I6, I4, 1
+    sub I7, I5, I6
+    substr R8, R7, I6, I7
+    parse.i64 I0, R8
+    bz I4, arg_l
+    substr R4, R7, 0, I4
+    jmp arg_l
+port_only:
+    parse.i64 I0, R7
+    jmp arg_l
+
+start_srv:
+    spawn task_store_loop () -> (I8)
+    new R9, A2aServer
+    mov R9->A2aServer.name, name
+    mov R9->A2aServer.version, version
+    call core.to_str (desc) -> (R10)
+    mov R9->A2aServer.description, R10
+    mov R9->A2aServer.handler, handler
+    mov R9->A2aServer.tasks_pid, I8
+
+    tostr R11, I0
+    strcat R12, "http://", R4, ":", R11
+    closure a2a_http_handler (R9, R12) -> (R13)
+    call http.start (R4, I0, R13) -> (I9, I10)
+    ncall "fs.stderr" -> (R14)
+    tostr R15, I10
+    strcat R16, "ail a2a_agent '", name, "' listening on http://", R4, ":", R15, "\n"
+    ncall "fs.write" (R14, R16)
+    monitor I9
+    recv R17
+    ret
+.endf

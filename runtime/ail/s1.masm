@@ -1,0 +1,360 @@
+; ail.s1 - System 1 discriminative decision runtime (Jev, OpenAI/Ollama fallback, mock)
+; Logical `s1.<name>` bindings resolved from MLWSVM env (.ail.env).
+; Returns an AilObj whose fields are AilDecideVal (transparent value + .confidence + .probs).
+
+.module ail.s1
+.import ail.core as core
+.import ail.config as cfg
+.import std.http as http
+.import ail.llm as llm
+.export run_decide
+
+; Safe float read from native JSON map (handles both f64 and i64)
+.func jmap_f64(ref m, ref key, f64 def) -> f64
+    bz.r m, ret_def
+    mhas I0, m, key
+    bz I0, ret_def
+.try try_int
+    mget F1, m, key, def
+    ret F1
+.endtry
+try_int:
+    catch R9
+.try ret_def
+    mget I1, m, key, 0
+    cvt.f64.i64 F1, I1
+    ret F1
+.endtry
+ret_def:
+    catch R9
+    ret def
+.endf
+
+; Safe i64 read from native JSON map
+.func jmap_i64(ref m, ref key, i64 def) -> i64
+    bz.r m, ret_def
+    mhas I0, m, key
+    bz I0, ret_def
+.try try_flt
+    mget I1, m, key, def
+    ret I1
+.endtry
+try_flt:
+    catch R9
+.try ret_def
+    mget F1, m, key, 0.0
+    cvt.i64.f64 I1, F1
+    ret I1
+.endtry
+ret_def:
+    catch R9
+    ret def
+.endf
+
+; Extract JSON object substring from text (strips markdown fences if present)
+.func extract_json(ref text) -> ref
+    ncall "text.trim" (text) -> (R1)
+    ncall "text.find" (R1, "{", 0) -> (I0)
+    blt I0, 0, ret_orig
+    len I1, R1
+    sub I2, I1, 1
+1:  blt I2, I0, ret_orig
+    mov I3, R1[I2]
+    beq I3, '}', 2f
+    sub I2, I2, 1
+    jmp 1b
+2:  sub I4, I2, I0
+    inc I4
+    substr R2, R1, I0, I4
+    ret R2
+ret_orig:
+    ret R1
+.endf
+
+; Convert a raw field entry map {"value": ..., "confidence": f64, "probs": ...}
+; into AilDecideVal according to schema field kind ("choice" | "score" | "prob").
+.func build_decide_field(ref kind, ref entry) -> ref
+    call jmap_f64 (entry, "confidence", 0.9) -> (F0)
+    mov R3, null
+    mhas I0, entry, "probs"
+    bz I0, 1f
+    mget.r R4, entry, "probs", null
+    call core.wrap_json (R4) -> (R3)
+1:
+    strcmp I1, kind, "choice"
+    bz I1, k_choice
+    strcmp I1, kind, "score"
+    bz I1, k_score
+    ; prob -> AilFloat(0.0..1.0)
+    call jmap_f64 (entry, "value", 0.5) -> (F1)
+    call core.mk_float (F1) -> (R5)
+    call core.mk_decide_val (R5, F0, R3) -> (R6)
+    ret R6
+k_choice:
+    mget.r R5, entry, "value", ""
+    call core.mk_sym (R5) -> (R6)
+    call core.mk_decide_val (R6, F0, R3) -> (R7)
+    ret R7
+k_score:
+    call jmap_i64 (entry, "value", 1) -> (I2)
+    call core.mk_int (I2) -> (R5)
+    call core.mk_decide_val (R5, F0, R3) -> (R6)
+    ret R6
+.endf
+
+; ---- Mock System 1 driver ----
+; Config example:
+;   s1.router = {"driver": "mock",
+;                "rules": [{"match": "invoice", "result": {"queue": {"value": "billing", "confidence": 0.95}, "urgency": {"value": 4, "confidence": 0.9}}}],
+;                "default": {"queue": {"value": "tech", "confidence": 0.60}, "urgency": {"value": 2, "confidence": 0.8}}}
+.func decide_mock(ref scfg, ref input_str, ref schema_map) -> ref
+    ncall "text.lower" (input_str) -> (R3)
+    mov R4, null                      ; matched result map
+
+    mhas I0, scfg, "rules"
+    bz I0, use_default
+    mget.r R5, scfg, "rules", null
+    bz.r R5, use_default
+    len I1, R5
+    mov I2, 0
+rl_loop:
+    bge I2, I1, use_default
+    mov R6, R5[I2]
+    inc I2
+    mget.r R7, R6, "match", ""
+    ncall "text.lower" (R7) -> (R7)
+    ncall "text.find" (R3, R7, 0) -> (I3)
+    blt I3, 0, rl_loop
+    mget.r R4, R6, "result", null
+    jmp build_res
+
+use_default:
+    mget.r R4, scfg, "default", null
+    bnz.r R4, build_res
+    mnew R4
+
+build_res:
+    call core.mk_obj (null) -> (R8)
+    mget.r R9, schema_map, "properties", null
+    bz.r R9, done
+    mkeys R10, R9
+    len I4, R10
+    mov I5, 0
+f_loop:
+    bge I5, I4, done
+    mov R11, R10[I5]                  ; field name
+    inc I5
+    mget.r R12, R9, R11, null         ; {"kind": "choice"|"score"|"prob", "options": [...]}
+    mget.r R13, R12, "kind", "choice"
+    mhas I6, R4, R11
+    bz I6, synth_default
+    mget.r R14, R4, R11, null
+    call build_decide_field (R13, R14) -> (R15)
+    mset R8->core.AilObj.fields, R11, R15
+    jmp f_loop
+synth_default:
+    ; Synthesize sensible default if field wasn't specified in mock rule
+    mnew R14
+    strcmp I7, R13, "choice"
+    bnz I7, sd_non_c
+    mget.r R16, R12, "options", null
+    mov R17, "unknown"
+    bz.r R16, sd_set_c
+    len I8, R16
+    bz I8, sd_set_c
+    mov R17, R16[0]
+sd_set_c:
+    mset R14, "value", R17
+    mset R14, "confidence", 0.5
+    jmp sd_build
+sd_non_c:
+    strcmp I7, R13, "score"
+    bnz I7, sd_prob
+    mset R14, "value", 1
+    mset R14, "confidence", 0.5
+    jmp sd_build
+sd_prob:
+    mset R14, "value", 0.5
+    mset R14, "confidence", 0.5
+sd_build:
+    call build_decide_field (R13, R14) -> (R15)
+    mset R8->core.AilObj.fields, R11, R15
+    jmp f_loop
+done:
+    ret R8
+.endf
+
+; ---- Jev HTTP/TLS System 1 driver ----
+.func decide_jev(ref scfg, ref input_str, ref schema_map) -> ref
+    mget.r R3, scfg, "url", "https://api.typesafe.ai/v1"
+    mget.r R4, scfg, "api_key", ""
+    call jmap_i64 (scfg, "timeout_ms", 15000) -> (I0)
+    ncall "text.ends_with" (R3, "/") -> (I1)
+    bz I1, 1f
+    len I2, R3
+    sub I2, I2, 1
+    substr R3, R3, 0, I2
+1:  strcat R5, R3, "/decide"
+
+    mnew R6
+    mset R6, "input", input_str
+    mget.r R7, schema_map, "properties", null
+    mset R6, "questions", R7
+    ncall "json.stringify" (R6, 0) -> (R8)
+
+    mnew R9
+    mset R9, "Content-Type", "application/json"
+    len I3, R4
+    bz I3, 2f
+    strcat R10, "Bearer ", R4
+    mset R9, "Authorization", R10
+2:  call http.request ("POST", R5, R9, R8, I0) -> (R11)
+    mget I4, R11, "status", 0
+    mget.r R12, R11, "body", ""
+    blt I4, 200, j_err
+    bge I4, 300, j_err
+    ncall "json.parse" (R12) -> (R13)
+    mget.r R14, R13, "decisions", R13
+
+    call core.mk_obj (null) -> (R15)
+    mkeys R16, R7
+    len I5, R16
+    mov I6, 0
+jl:
+    bge I6, I5, j_done
+    mov R17, R16[I6]
+    inc I6
+    mget.r R18, R7, R17, null
+    mget.r R19, R18, "kind", "choice"
+    mget.r R20, R14, R17, null
+    bz.r R20, jl
+    call build_decide_field (R19, R20) -> (R21)
+    mset R15->core.AilObj.fields, R17, R21
+    jmp jl
+j_done:
+    ret R15
+j_err:
+    tostr R16, I4
+    strcat R17, "Jev System 1 HTTP error ", R16, ": ", R12
+    call core.mk_exc ("System1Error", R17) -> (R18)
+    throw R18
+.endf
+
+; ---- OpenAI/Ollama-backed System 1 fallback driver ----
+; Lets users run `decide` locally on Ollama when no dedicated Jev endpoint is configured!
+.func decide_via_llm(ref scfg, ref input_str, ref schema_json, ref schema_map) -> ref
+    mget.r R4, scfg, "url", "http://127.0.0.1:11434/v1"
+    mget.r R5, scfg, "model", ""
+    mget.r R6, scfg, "api_key", null
+    call jmap_i64 (scfg, "timeout_ms", 120000) -> (I0)
+
+    ncall "text.ends_with" (R4, "/") -> (I1)
+    bz I1, 1f
+    len I2, R4
+    sub I2, I2, 1
+    substr R4, R4, 0, I2
+1:  strcat R7, R4, "/chat/completions"
+
+    strcat R8, "You are a strict discriminative classifier. Given the input and schema below, return ONLY a JSON object mapping each field name to {\"value\": <chosen option string, integer score, or 0.0-1.0 probability>, \"confidence\": <0.0-1.0 float>}. No prose, no markdown.\nSchema: ", schema_json
+    lnew R9
+    mnew R10
+    mset R10, "role", "system"
+    mset R10, "content", R8
+    lpush R9, R10
+    mnew R11
+    mset R11, "role", "user"
+    mset R11, "content", input_str
+    lpush R9, R11
+
+    mnew R12
+    mset R12, "model", R5
+    mset R12, "messages", R9
+    ncall "json.stringify" (R12, 0) -> (R13)
+
+    mnew R14
+    mset R14, "Content-Type", "application/json"
+    bz.r R6, 2f
+    len I3, R6
+    bz I3, 2f
+    strcat R15, "Bearer ", R6
+    mset R14, "Authorization", R15
+2:  call http.request ("POST", R7, R14, R13, I0) -> (R16)
+    mget I4, R16, "status", 0
+    mget.r R17, R16, "body", ""
+    blt I4, 200, l_err
+    bge I4, 300, l_err
+    ncall "json.parse" (R17) -> (R18)
+    mget.r R19, R18, "choices", null
+    mov R20, R19[0]
+    mget.r R21, R20, "message", null
+    mget.r R22, R21, "content", "{}"
+    call extract_json (R22) -> (R23)
+    ncall "json.parse" (R23) -> (R24)
+
+    call core.mk_obj (null) -> (R25)
+    mget.r R26, schema_map, "properties", null
+    mkeys R27, R26
+    len I5, R27
+    mov I6, 0
+ll_loop:
+    bge I6, I5, ll_done
+    mov R28, R27[I6]
+    inc I6
+    mget.r R29, R26, R28, null
+    mget.r R30, R29, "kind", "choice"
+    mhas I7, R24, R28
+    bz I7, ll_loop
+    mget.r R15, R24, R28, null
+    call build_decide_field (R30, R15) -> (R14)
+    mset R25->core.AilObj.fields, R28, R14
+    jmp ll_loop
+ll_done:
+    ret R25
+l_err:
+    tostr R18, I4
+    strcat R19, "System 1 LLM fallback HTTP error ", R18, ": ", R17
+    call core.mk_exc ("System1Error", R19) -> (R20)
+    throw R20
+.endf
+
+; ---- Public entrypoint: run_decide(model_sym, input_val, schema_json) -> DecideResult AilObj ----
+
+.func run_decide(ref model_val, ref input_val, ref schema_json) -> ref
+    call core.to_str (model_val) -> (R3)
+    call core.to_str (input_val) -> (R4)
+    call cfg.require_binding ("s1", R3) -> (R5)
+    mget.r R6, R5, "driver", "jev"
+    ncall "json.parse" (schema_json) -> (R7)
+
+    strcmp I0, R6, "mock"
+    bnz I0, chk_jev
+    call decide_mock (R5, R4, R7) -> (R8)
+    jmp emit_evt
+chk_jev:
+    strcmp I0, R6, "jev"
+    bnz I0, chk_oai
+    call decide_jev (R5, R4, R7) -> (R8)
+    jmp emit_evt
+chk_oai:
+    strcmp I0, R6, "openai"
+    bz I0, do_oai
+    strcmp I0, R6, "ollama"
+    bnz I0, bad_drv
+do_oai:
+    call decide_via_llm (R5, R4, schema_json, R7) -> (R8)
+
+emit_evt:
+    ncall "monitor.on" -> (I1)
+    bz I1, ret_ok
+    mnew R9
+    mset R9, "binding", R3
+    mset R9, "driver", R6
+    ncall "monitor.event" ("ail.s1.decide", R9)
+ret_ok:
+    ret R8
+
+bad_drv:
+    strcat R9, "unknown s1 driver '", R6, "' for binding s1.", R3
+    call core.mk_exc ("ConfigError", R9) -> (R10)
+    throw R10
+.endf

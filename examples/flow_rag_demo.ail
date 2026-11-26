@@ -1,0 +1,91 @@
+# examples/flow_rag_demo.ail — End-to-end v0.3.0 test:
+# System 1 decide + stateful flow with confidence escalation & bounded cycle + Knowledge/RAG
+
+use s1: :router
+use embedder: :docs
+use vector_db: :kb
+
+# 1. Direct System 1 `decide` expression
+d1 = decide using: :router, on: "Double charge on invoice #99" do
+  choice :queue, [:billing, :tech, :fraud]
+  score  :urgency, 1..5
+  prob   :duplicate?
+end
+puts "s1_direct=#{d1.queue}:conf=#{d1.queue.confidence}:urg=#{d1.urgency}:match=#{d1.queue == :billing && d1.queue.confidence >= 0.85}"
+
+# 2. Stateful `flow` with System 1 routing, low-confidence escalation, and a bounded cycle
+def intake(s)
+  s
+end
+
+def billing(s)
+  s["route"] = "billing"
+  s
+end
+
+def tech(s)
+  s["route"] = "tech"
+  s
+end
+
+def deep_review(s)
+  s["route"] = "escalated_s2"
+  s
+end
+
+def draft(s)
+  s["revisions"] = s["revisions"] + 1
+  s
+end
+
+def critique(s)
+  s
+end
+
+def done(s)
+  "#{s["route"]}:rev=#{s["revisions"]}"
+end
+
+flow SupportFlow
+  start :intake
+  node :intake --> :triage
+
+  decide :triage, using: :router do
+    choice :queue, [:billing, :tech, :fraud]
+    score  :urgency, 1..5
+  end
+
+  edge :triage      --> :billing,     when: ->(d) { d.queue == :billing && d.queue.confidence >= 0.85 }
+  edge :triage      --> :tech,        when: ->(d) { d.queue == :tech    && d.queue.confidence >= 0.85 }
+  edge :triage      --> :deep_review
+  edge :billing     --> :draft
+  edge :tech        --> :draft
+  edge :deep_review --> :draft
+  edge :draft       --> :critique
+  # Bounded cycle: approves never flips true, so max: 2 must stop at 3 total draft visits (1 initial + 2 retries)
+  edge :critique    --> :draft, unless: ->(s) { s["approved"] }, max: 2
+  edge :critique    --> :done
+end
+
+r_bill = SupportFlow.run({ body: "Need refund on invoice", revisions: 0, approved: true })
+puts "flow_billing=#{r_bill}"
+
+r_esc = SupportFlow.run({ body: "Ambiguous general question", revisions: 0, approved: false })
+puts "flow_escalate_bounded=#{r_esc}"
+
+# 3. Pluggable RAG: Knowledge + flat f32 vector_db + metadata filter
+kb = Knowledge.new(vector_db: :kb)
+kb.ingest("doc_c",   "MLWSVM register machine virtual machine written in C11", { lang: "c" })
+kb.ingest("doc_ail", "AIL ruby syntax agents guardrails and MCP servers",       { lang: "ail" })
+kb.ingest("doc_py",  "Python data science notebooks and plotting",              { lang: "py" })
+kb.ingest("doc_c2",  "C11 garbage collector and generational heap allocator",   { lang: "c" })
+
+top_all = kb.search("ruby agents MCP servers", top_k: 1)
+puts "rag_top=#{top_all[0]["id"]}:kb_size=#{kb.size}"
+
+top_c = kb.search("garbage collector heap", top_k: 2, filter: { lang: "c" })
+puts "rag_filtered=#{top_c[0]["id"]}:count=#{top_c.size}"
+
+ctx = Context.new
+ctx.attach(:knowledge, top_c)
+puts "ctx_rag_events=#{ctx.view(:audit).size}"

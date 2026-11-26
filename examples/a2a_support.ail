@@ -1,0 +1,39 @@
+# examples/a2a_support.ail — Live A2A Agent Server backed by a System 1 + Flow pipeline
+# Run: ./ail run examples/a2a_support.ail --env examples/flow_rag.ail.env -- --http 127.0.0.1:9000
+
+use s1: :router
+
+def intake(text)
+  { body: text, route: "unknown" }
+end
+
+def billing(s)
+  "Routed to BILLING queue for: #{s["body"]}"
+end
+
+def tech(s)
+  "Routed to TECH queue for: #{s["body"]}"
+end
+
+def deep_review(s)
+  "Escalated to HUMAN/S2 review for: #{s["body"]}"
+end
+
+flow TriageFlow
+  start :intake
+  node :intake --> :triage
+
+  decide :triage, using: :router do
+    choice :queue, [:billing, :tech, :fraud]
+    score  :urgency, 1..5
+  end
+
+  edge :triage --> :billing, when: ->(d) { d.queue == :billing && d.queue.confidence >= 0.85 }
+  edge :triage --> :tech,    when: ->(d) { d.queue == :tech    && d.queue.confidence >= 0.85 }
+  edge :triage --> :deep_review
+end
+
+a2a_agent "support-router", version: "0.3.0" do
+  description "Triages support tickets using System 1 routing and bounded workflows"
+  handler TriageFlow
+end

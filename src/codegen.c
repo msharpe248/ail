@@ -624,6 +624,15 @@ static void emit_expr(Codegen *cg, Node *n) {
                 break;
             }
 
+            /* Knowledge.new(...) -> ail.vector.new_knowledge */
+            if (n->u.call.recv && n->u.call.recv->kind == ND_IDENT &&
+                strcmp(n->u.call.recv->u.ident.name, "Knowledge") == 0 &&
+                strcmp(n->u.call.name, "new") == 0) {
+                emit_call_args_list(cg, &n->u.call.args, &n->u.call.kwargs);
+                sb_append(cg->cur, "    call vecmod.new_knowledge (R3) -> (R3)\n");
+                break;
+            }
+
             /* Stdlib module calls (File.read, Files.glob, JSON.parse, Config.get) */
             char modfn[128];
             if (is_stdlib_module_call(n, modfn, sizeof(modfn))) {
@@ -1129,16 +1138,79 @@ static void emit_expr(Codegen *cg, Node *n) {
             sb_append(cg->cur, ", R3)\n");
             break;
 
-        case ND_FLOW:
-            sb_append(cg->cur, "    mnew R4\n");
-            sb_append(cg->cur, "    call stubs.mk_flow (");
+        case ND_FLOW: {
+            sb_append(cg->cur, "    mnew R3\n");
+            sb_append(cg->cur, "    push R3\n"); /* SP[0] = fields map */
+            if (n->u.flow_nd.start_node) {
+                sb_append(cg->cur, "    mov R4, SP[0]\n    mset R4, \"start\", ");
+                sb_append_escaped(cg->cur, n->u.flow_nd.start_node, strlen(n->u.flow_nd.start_node));
+                sb_append(cg->cur, "\n");
+            }
+            sb_append(cg->cur, "    mov R4, SP[0]\n    mov R5, LOC[0]\n    mset R4, \"env\", R5\n");
+
+            /* nodes map */
+            sb_append(cg->cur, "    mnew R3\n    push R3\n"); /* SP[0] = nodes, SP[1] = fields */
+            for (size_t i = 0; i < n->u.flow_nd.node_len; i++) {
+                FlowNodeDecl *fn = &n->u.flow_nd.nodes[i];
+                if (fn->handler && fn->handler->kind == ND_DECIDE) {
+                    Node *dec = fn->handler;
+                    sb_append(cg->cur, "    mnew R3\n    push R3\n");
+                    sb_append(cg->cur, "    mov R4, SP[0]\n    mset R4, \"__decide__\", 1\n");
+                    if (dec->u.decide_nd.using_model) {
+                        emit_expr(cg, dec->u.decide_nd.using_model);
+                        sb_append(cg->cur, "    mov R4, SP[0]\n    mset R4, \"model\", R3\n");
+                    }
+                    const char *js = dec->u.decide_nd.json_schema ? dec->u.decide_nd.json_schema : "{}";
+                    sb_append(cg->cur, "    mov R4, SP[0]\n    mset R4, \"schema\", ");
+                    sb_append_escaped(cg->cur, js, strlen(js));
+                    sb_append(cg->cur, "\n    pop R3\n");
+                } else if (fn->handler) {
+                    emit_expr(cg, fn->handler);
+                } else {
+                    sb_append(cg->cur, "    mov R3, null\n");
+                }
+                sb_append(cg->cur, "    mov R4, SP[0]\n    mset R4, ");
+                sb_append_escaped(cg->cur, fn->name, strlen(fn->name));
+                sb_append(cg->cur, ", R3\n");
+            }
+            sb_append(cg->cur, "    pop R3\n    mov R4, SP[0]\n    mset R4, \"nodes\", R3\n");
+
+            /* edges list */
+            sb_append(cg->cur, "    lnew R3\n    push R3\n"); /* SP[0] = edges, SP[1] = fields */
+            for (size_t i = 0; i < n->u.flow_nd.edge_len; i++) {
+                FlowEdgeDecl *e = &n->u.flow_nd.edges[i];
+                sb_append(cg->cur, "    mnew R3\n    push R3\n"); /* SP[0] = edge map */
+                sb_append(cg->cur, "    mov R4, SP[0]\n    mset R4, \"from\", ");
+                sb_append_escaped(cg->cur, e->from, strlen(e->from));
+                sb_append(cg->cur, "\n    mset R4, \"to\", ");
+                sb_append_escaped(cg->cur, e->to, strlen(e->to));
+                sb_printf(cg->cur, "\n    mset R4, \"invert\", %d\n", e->invert_cond ? 1 : 0);
+                if (e->cond) {
+                    emit_expr(cg, e->cond);
+                } else {
+                    sb_append(cg->cur, "    mov R3, null\n");
+                }
+                sb_append(cg->cur, "    mov R4, SP[0]\n    mset R4, \"cond\", R3\n");
+                if (e->max_bound) {
+                    emit_expr(cg, e->max_bound);
+                } else {
+                    sb_append(cg->cur, "    mov R3, null\n");
+                }
+                sb_append(cg->cur, "    mov R4, SP[0]\n    mset R4, \"max\", R3\n");
+                sb_append(cg->cur, "    pop R3\n    mov R4, SP[0]\n    lpush R4, R3\n");
+            }
+            sb_append(cg->cur, "    pop R3\n    mov R4, SP[0]\n    mset R4, \"edges\", R3\n");
+
+            sb_append(cg->cur, "    pop R5\n");
+            sb_append(cg->cur, "    mov R4, ");
             sb_append_escaped(cg->cur, n->u.flow_nd.name, strlen(n->u.flow_nd.name));
-            sb_append(cg->cur, ", R4) -> (R3)\n");
+            sb_append(cg->cur, "\n    call flowmod.mk_flow (R4, R5) -> (R3)\n");
             sb_append(cg->cur, "    mov R4, LOC[0]\n");
             sb_append(cg->cur, "    call core.env_def (R4, ");
             sb_append_escaped(cg->cur, n->u.flow_nd.name, strlen(n->u.flow_nd.name));
             sb_append(cg->cur, ", R3)\n");
             break;
+        }
 
         case ND_DECIDE:
             emit_expr(cg, n->u.decide_nd.using_model);
@@ -1148,7 +1220,7 @@ static void emit_expr(Codegen *cg, Node *n) {
             sb_append(cg->cur, "    mov R5, ");
             sb_append_escaped(cg->cur, n->u.decide_nd.json_schema ? n->u.decide_nd.json_schema : "{}",
                               n->u.decide_nd.json_schema ? strlen(n->u.decide_nd.json_schema) : 2);
-            sb_append(cg->cur, "\n    call stubs.run_decide (R4, R3, R5) -> (R3)\n");
+            sb_append(cg->cur, "\n    call s1.run_decide (R4, R3, R5) -> (R3)\n");
             break;
 
         case ND_A2A_AGENT:
@@ -1158,11 +1230,12 @@ static void emit_expr(Codegen *cg, Node *n) {
             if (n->u.a2a_nd.handler) emit_expr(cg, n->u.a2a_nd.handler);
             else sb_append(cg->cur, "    mov R3, null\n");
             sb_append(cg->cur, "    pop R4\n");
-            sb_append(cg->cur, "    call stubs.run_a2a (");
+            sb_append(cg->cur, "    call a2amod.serve (");
             sb_append_escaped(cg->cur, n->u.a2a_nd.name, strlen(n->u.a2a_nd.name));
             sb_append(cg->cur, ", ");
             sb_append_escaped(cg->cur, n->u.a2a_nd.version, strlen(n->u.a2a_nd.version));
-            sb_append(cg->cur, ", R4, R3) -> (R3)\n");
+            sb_append(cg->cur, ", R4, R3)\n");
+            sb_append(cg->cur, "    mov R3, null\n");
             break;
 
         case ND_BLOCK:
@@ -1223,7 +1296,7 @@ bool codegen_module(const char *source_file, Node *program, const SemaInfo *sema
     sb_append(&main_buf, ".endf\n");
 
     /* Assemble final .masm output */
-    sb_printf(out_masm, "; Generated by ail 0.2.0 from %s\n", source_file ? source_file : "<input>");
+    sb_printf(out_masm, "; Generated by ail 0.3.0 from %s\n", source_file ? source_file : "<input>");
     sb_append(out_masm, ".import ail.core as core\n");
     sb_append(out_masm, ".import ail.config as cfg\n");
     sb_append(out_masm, ".import ail.budget as budget\n");
@@ -1232,8 +1305,12 @@ bool codegen_module(const char *source_file, Node *program, const SemaInfo *sema
     sb_append(out_masm, ".import ail.mcp_client as mcpc\n");
     sb_append(out_masm, ".import ail.skill as skill\n");
     sb_append(out_masm, ".import ail.llm as llm\n");
+    sb_append(out_masm, ".import ail.s1 as s1\n");
+    sb_append(out_masm, ".import ail.vector as vecmod\n");
     sb_append(out_masm, ".import ail.context as ctxmod\n");
     sb_append(out_masm, ".import ail.agent as agmod\n");
+    sb_append(out_masm, ".import ail.flow as flowmod\n");
+    sb_append(out_masm, ".import ail.a2a as a2amod\n");
     sb_append(out_masm, ".import ail.stubs as stubs\n");
 
     if (cg.funcs.len > 0) sb_append_n(out_masm, cg.funcs.data, cg.funcs.len);

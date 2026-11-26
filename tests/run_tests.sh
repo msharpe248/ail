@@ -35,6 +35,15 @@ pass "check examples/agent_mock_demo.ail"
 $AIL check examples/agent_ollama.ail >/dev/null || fail "check agent_ollama.ail"
 pass "check examples/agent_ollama.ail"
 
+$AIL check examples/flow_rag_demo.ail >/dev/null || fail "check flow_rag_demo.ail"
+pass "check examples/flow_rag_demo.ail"
+
+$AIL check examples/a2a_support.ail >/dev/null || fail "check a2a_support.ail"
+pass "check examples/a2a_support.ail"
+
+$AIL check examples/flow_ollama.ail >/dev/null || fail "check flow_ollama.ail"
+pass "check examples/flow_ollama.ail"
+
 if $AIL check tests/bad_unbounded_cycle.ail >/dev/null 2>&1; then
     fail "bad_unbounded_cycle.ail should have been rejected"
 else
@@ -154,7 +163,46 @@ test -s /tmp/ail_v02_demo_session.jsonl || fail "JSONL db persistence file empty
 rm -f /tmp/ail_v02_demo_session.jsonl
 pass "Context JSONL db persistence written"
 
-echo "=== 7. Standalone executable bundle (ail bundle) ==="
+echo "=== 7. v0.3.0 System 1 decide + Stateful Flow + Flat f32 RAG ==="
+FLOW_OUT=$($AIL run examples/flow_rag_demo.ail --env examples/flow_rag.ail.env)
+FLOW_EXPECTED=$(cat <<'EOF'
+s1_direct=billing:conf=0.94:urg=4:match=true
+flow_billing=billing:rev=1
+flow_escalate_bounded=escalated_s2:rev=3
+rag_top=doc_ail:kb_size=4
+rag_filtered=doc_c2:count=2
+ctx_rag_events=1
+EOF
+)
+if [ "$FLOW_OUT" = "$FLOW_EXPECTED" ]; then
+    pass "v0.3.0 decide + stateful flow (escalation + bounded cycle) + flat f32 RAG"
+else
+    echo "Expected:"
+    echo "$FLOW_EXPECTED"
+    echo "Got:"
+    echo "$FLOW_OUT"
+    fail "examples/flow_rag_demo.ail output mismatch"
+fi
+
+echo "=== 8. v0.3.0 Live A2A Agent Server (Agent Card + JSON-RPC tasks) ==="
+$AIL run examples/a2a_support.ail --env examples/flow_rag.ail.env -- --http 127.0.0.1:18766 >/dev/null 2>&1 &
+A2A_PID=$!
+sleep 0.5
+A2A_CARD=$(curl -s http://127.0.0.1:18766/.well-known/agent.json || true)
+A2A_SEND=$(curl -s -X POST http://127.0.0.1:18766/ \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"id":"t-100","message":{"role":"user","parts":[{"type":"text","text":"Duplicate invoice charge"}]}}}' || true)
+A2A_GET=$(curl -s -X POST http://127.0.0.1:18766/ \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tasks/get","params":{"id":"t-100"}}' || true)
+kill $A2A_PID 2>/dev/null || true
+wait $A2A_PID 2>/dev/null || true
+echo "$A2A_CARD" | grep -q '"name": "support-router"' || fail "a2a agent card ($A2A_CARD)"
+echo "$A2A_SEND" | grep -q 'Routed to BILLING queue' || fail "a2a message/send ($A2A_SEND)"
+echo "$A2A_GET" | grep -q '"id":"t-100"' || fail "a2a tasks/get ($A2A_GET)"
+pass "v0.3.0 A2A server end-to-end (Agent Card, message/send, tasks/get)"
+
+echo "=== 9. Standalone executable bundle (ail bundle) ==="
 $AIL bundle examples/hello.ail -o build/hello_bin || fail "ail bundle"
 BUNDLE_OUT=$(./build/hello_bin)
 EXPECTED_HELLO=$(cat <<'EOF'

@@ -1,0 +1,11 @@
+# examples/flow_ollama.ail — Live Ollama System 1 decide + Flow routing
+# Run: ./ail run examples/flow_ollama.ail --env examples/ollama_v03.ail.env
+
+use s1: :router
+
+d = decide using: :router, on: "My credit card was billed twice for invoice #404!" do
+  choice :queue, [:billing, :tech, :fraud]
+  score  :urgency, 1..5
+end
+
+puts "ollama_decide=queue:#{d.queue}:conf:#{d.queue.confidence}:urgency:#{d.urgency}"

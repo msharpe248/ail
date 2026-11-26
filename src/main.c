@@ -12,7 +12,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#define AIL_VERSION "0.2.0"
+#define AIL_VERSION "0.3.0"
 
 static void usage(void) {
     fprintf(stderr,

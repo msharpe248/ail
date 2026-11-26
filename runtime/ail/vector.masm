@@ -1,0 +1,490 @@
+; ail.vector - Pluggable Knowledge / Vector DB + Embedder runtime
+; Stores embeddings in a single flat N*dim f32 typed array (aligned with MLWSVM R4 vec.*).
+; Supports embedder drivers: "openai" (OpenAI / Ollama /v1/embeddings) and "mock" (deterministic).
+; Supports vector_db drivers: "memory" with cosine, dot, or l2 metrics + metadata pre-filtering.
+
+.module ail.vector
+.import ail.core as core
+.import ail.config as cfg
+.import std.http as http
+.export init, new_knowledge, embed_text
+
+inited: .i64 0
+kb_cls: .zero 8
+
+; ---- Embedders ----
+
+; Deterministic 64-dim normalized f32 bag-of-words/trigram mock embedder (zero network, offline RAG tests!)
+.func embed_mock(ref text, i64 dim) -> ref
+    anew.f32 R1, dim
+    ncall "text.lower" (text) -> (R2)
+    ncall "text.words" (R2) -> (R3)
+    len I1, R3
+    mov I2, 0
+w_loop:
+    bge I2, I1, norm_vec
+    mov R4, R3[I2]
+    inc I2
+    ncall "hash.crc32" (R4) -> (I3)
+    rem I4, I3, dim
+    bge I4, 0, 1f
+    add I4, I4, dim
+1:  mov F0, R1[I4]
+    add F0, F0, 1.0
+    mov R1[I4], F0
+    ; Also hash 3-char prefix for mild stem overlap (e.g. "refund"/"refunds")
+    len I5, R4
+    blt I5, 3, w_loop
+    substr R5, R4, 0, 3
+    ncall "hash.crc32" (R5) -> (I6)
+    rem I7, I6, dim
+    bge I7, 0, 2f
+    add I7, I7, dim
+2:  mov F0, R1[I7]
+    add F0, F0, 0.5
+    mov R1[I7], F0
+    jmp w_loop
+
+norm_vec:
+    mov F1, 0.0
+    mov I8, 0
+n1:
+    bge I8, dim, n2
+    mov F2, R1[I8]
+    mul F3, F2, F2
+    add F1, F1, F3
+    inc I8
+    jmp n1
+n2:
+    ble F1, 0.0, done
+    sqrt F1, F1
+    mov I8, 0
+n3:
+    bge I8, dim, done
+    mov F2, R1[I8]
+    div F2, F2, F1
+    mov R1[I8], F2
+    inc I8
+    jmp n3
+done:
+    ret R1
+.endf
+
+; OpenAI / Ollama /v1/embeddings HTTP+TLS embedder -> f32 typed array
+.func embed_openai(ref ecfg, ref text) -> ref
+    mget.r R2, ecfg, "url", "https://api.openai.com/v1"
+    mget.r R3, ecfg, "model", "text-embedding-3-small"
+    mget.r R4, ecfg, "api_key", null
+    ncall "text.ends_with" (R2, "/") -> (I0)
+    bz I0, 1f
+    len I1, R2
+    sub I1, I1, 1
+    substr R2, R2, 0, I1
+1:  strcat R5, R2, "/embeddings"
+
+    mnew R6
+    mset R6, "model", R3
+    mset R6, "input", text
+    ncall "json.stringify" (R6, 0) -> (R7)
+
+    mnew R8
+    mset R8, "Content-Type", "application/json"
+    bz.r R4, 2f
+    len I2, R4
+    bz I2, 2f
+    strcat R9, "Bearer ", R4
+    mset R8, "Authorization", R9
+2:  call http.request ("POST", R5, R8, R7, 30000) -> (R10)
+    mget I3, R10, "status", 0
+    mget.r R11, R10, "body", ""
+    blt I3, 200, e_err
+    bge I3, 300, e_err
+    ncall "json.parse" (R11) -> (R12)
+    mget.r R13, R12, "data", null
+    mov R14, R13[0]
+    mget.r R15, R14, "embedding", null
+    len I4, R15
+    anew.f32 R16, I4
+    mov I5, 0
+cp:
+    bge I5, I4, cp_done
+    ldv I6, F0, R15[I5]
+    tagof I7, R15[I5]
+    bne I7, 6, store_f
+    cvt.f64.i64 F0, I6
+store_f:
+    mov R16[I5], F0
+    inc I5
+    jmp cp
+cp_done:
+    ret R16
+e_err:
+    tostr R13, I3
+    strcat R14, "Embedder HTTP error ", R13, ": ", R11
+    call core.mk_exc ("EmbedderError", R14) -> (R15)
+    throw R15
+.endf
+
+; embed_text(embedder_name, text) -> f32 array
+.func embed_text(ref emb_name, ref text) -> ref
+    call core.to_str (text) -> (R2)
+    bz.r emb_name, use_mock
+    call core.to_str (emb_name) -> (R3)
+    call cfg.get_binding_raw ("embedder", R3) -> (R4)
+    bz.r R4, use_mock
+    mget.r R5, R4, "driver", "mock"
+    strcmp I0, R5, "mock"
+    bz I0, use_mock_dim
+    strcmp I0, R5, "openai"
+    bz I0, do_oai
+    strcmp I0, R5, "ollama"
+    bnz I0, use_mock
+do_oai:
+    call embed_openai (R4, R2) -> (R6)
+    ret R6
+use_mock_dim:
+    mget I1, R4, "dim", 64
+    call embed_mock (R2, I1) -> (R6)
+    ret R6
+use_mock:
+    call embed_mock (R2, 64) -> (R6)
+    ret R6
+.endf
+
+; ---- Flat N*dim f32 matrix helpers (ready to swap in MLWSVM R4 vec.* batch natives!) ----
+
+; Append 1 row vector (len = dim) into flat f32 matrix, growing capacity geometrically
+.func append_row(ref kb_fields, ref vec)
+    len I0, vec                       ; dim
+    mget I1, kb_fields, "__dim__", 0
+    bnz I1, chk_dim
+    mov I1, I0
+    mset kb_fields, "__dim__", I1
+chk_dim:
+    bne I0, I1, dim_err
+    mget I2, kb_fields, "__rows__", 0
+    mget I3, kb_fields, "__cap__", 0
+    mget.r R2, kb_fields, "__mat__", null
+    blt I2, I3, copy_row
+    ; Grow capacity (min 16, else *2)
+    mov I4, 16
+    bz I3, do_alloc
+    mul I4, I3, 2
+do_alloc:
+    mul I5, I4, I1
+    anew.f32 R3, I5
+    bz.r R2, set_mat
+    mul I6, I2, I1
+    mov I7, 0
+grow_l:
+    bge I7, I6, set_mat
+    mov F0, R2[I7]
+    mov R3[I7], F0
+    inc I7
+    jmp grow_l
+set_mat:
+    mov R2, R3
+    mset kb_fields, "__mat__", R2
+    mset kb_fields, "__cap__", I4
+
+copy_row:
+    mul I8, I2, I1                    ; base offset = rows * dim
+    mov I9, 0
+cr_l:
+    bge I9, I1, cr_d
+    add I10, I8, I9
+    mov F0, vec[I9]
+    mov R2[I10], F0
+    inc I9
+    jmp cr_l
+cr_d:
+    inc I2
+    mset kb_fields, "__rows__", I2
+    ret
+dim_err:
+    call core.mk_exc ("VectorError", "embedding dimension mismatch") -> (R4)
+    throw R4
+.endf
+
+; Score row `row_idx` of flat f32 matrix against `query` f32 array.
+; metric: 0=dot, 1=cosine, 2=negative L2 (higher is always better!)
+; Note: dim=I0, row_idx=I1, metric=I2 -> use I3..I5 as temporaries!
+.func score_row(ref mat, i64 dim, i64 row_idx, ref query, i64 metric) -> f64
+    mul I3, row_idx, dim
+    mov I4, 0
+    mov F0, 0.0                       ; dot or sum_sq_diff
+    mov F1, 0.0                       ; norm_a^2
+    mov F2, 0.0                       ; norm_b^2
+    beq metric, 2, l2_loop
+dot_loop:
+    bge I4, dim, dot_done
+    add I5, I3, I4
+    mov F3, mat[I5]
+    mov F4, query[I4]
+    mul F5, F3, F4
+    add F0, F0, F5
+    bz metric, dot_next
+    mul F6, F3, F3
+    add F1, F1, F6
+    mul F6, F4, F4
+    add F2, F2, F6
+dot_next:
+    inc I4
+    jmp dot_loop
+dot_done:
+    bz metric, ret_score
+    mul F6, F1, F2
+    ble F6, 0.0, ret_zero
+    sqrt F6, F6
+    div F0, F0, F6
+ret_score:
+    ret F0
+ret_zero:
+    ret 0.0
+
+l2_loop:
+    bge I4, dim, l2_done
+    add I5, I3, I4
+    mov F3, mat[I5]
+    mov F4, query[I4]
+    sub F5, F3, F4
+    mul F5, F5, F5
+    add F0, F0, F5
+    inc I4
+    jmp l2_loop
+l2_done:
+    sqrt F0, F0
+    neg F0, F0                        ; higher = closer
+    ret F0
+.endf
+
+; Check metadata filter map against doc metadata map (exact equality on every filter key)
+.func matches_filter(ref doc_meta, ref filter_map) -> i64
+    bz.r filter_map, yes
+    bz.r doc_meta, no
+    mkeys R2, filter_map
+    len I0, R2
+    mov I1, 0
+1:  bge I1, I0, yes
+    mov R3, R2[I1]
+    inc I1
+    mhas I2, doc_meta, R3
+    bz I2, no
+    mget.r R4, filter_map, R3, null
+    mget.r R5, doc_meta, R3, null
+    call core.op_eq (R4, R5) -> (R6)
+    call core.is_truthy (R6) -> (I3)
+    bz I3, no
+    jmp 1b
+yes:
+    ret 1
+no:
+    ret 0
+.endf
+
+; ---- Knowledge methods ----
+
+; kb.ingest(id, text, meta_or_null)  OR  kb.add(text, meta_or_null)
+.func kb_ingest(ref self_v, ref args, ref block) -> ref
+    mov R3, self_v->core.AilObj.fields
+    len I0, args
+    blt I0, 2, ing_short
+    call core.to_str (args[0]) -> (R4) ; id
+    call core.to_str (args[1]) -> (R5) ; text
+    mov R6, null
+    blt I0, 3, ing_go
+    mov R6, args[2]
+    jmp ing_go
+ing_short:
+    mget I1, R3, "__rows__", 0
+    tostr R4, I1
+    call core.to_str (args[0]) -> (R5)
+    mov R6, null
+ing_go:
+    mget.r R7, R3, "__embedder__", null
+    call embed_text (R7, R5) -> (R8)
+    call append_row (R3, R8)
+    mnew R9
+    mset R9, "id", R4
+    mset R9, "text", R5
+    bz.r R6, 1f
+    mset R9, "meta", R6
+1:  mget.r R10, R3, "__docs__", null
+    lpush R10, R9
+    ret self_v
+.endf
+
+; Comparator for sorting [score_f64, doc_idx_i64] descending by score
+.func cmp_hit_desc(ref a, ref b) -> i64
+    mov F0, a[0]
+    mov F1, b[0]
+    bgt F0, F1, lt_r
+    blt F0, F1, gt_r
+    ret 0
+lt_r:
+    ret -1
+gt_r:
+    ret 1
+.endf
+
+; kb.search(query, top_k: 5, filter: { ... }) -> list of {"id", "text", "score", "meta"}
+.func kb_search(ref self_v, ref args, ref block) -> ref
+    mov R3, self_v->core.AilObj.fields
+    call core.to_str (args[0]) -> (R4)
+    mov I0, 5                         ; default top_k
+    mov R5, null                      ; optional filter map
+    len I1, args
+    blt I1, 2, do_search
+    mov R6, args[1]
+    typeof I2, R6
+    bne I2, 6, pos_k
+    mhas I3, R6, "top_k"
+    bz I3, chk_f
+    mget.r R7, R6, "top_k", null
+    call core.to_i64 (R7) -> (I0)
+chk_f:
+    mget.r R5, R6, "filter", null
+    jmp do_search
+pos_k:
+    call core.to_i64 (R6) -> (I0)
+
+do_search:
+    mget I4, R3, "__rows__", 0
+    bz I4, empty_res
+    mget I5, R3, "__dim__", 0
+    mget.r R8, R3, "__mat__", null
+    mget.r R9, R3, "__docs__", null
+    mget I6, R3, "__metric__", 1      ; 0=dot, 1=cosine, 2=l2
+    mget.r R10, R3, "__embedder__", null
+    call embed_text (R10, R4) -> (R11)
+
+    ; Score matching rows into scored list of [score_f64, idx_i64]
+    lnew R12
+    mov I7, 0
+sc_l:
+    bge I7, I4, sc_sort
+    mov R13, R9[I7]
+    mget.r R14, R13, "meta", null
+    call matches_filter (R14, R5) -> (I8)
+    bz I8, sc_next
+    call score_row (R8, I5, I7, R11, I6) -> (F0)
+    lnew R15
+    lpush R15, F0, I7
+    lpush R12, R15
+sc_next:
+    inc I7
+    jmp sc_l
+
+sc_sort:
+    closure cmp_hit_desc () -> (R16)
+    ncall "list.sort" (R12, R16)
+    ; Take top_k and wrap results as AIL Hash objects
+    lnew R17
+    len I9, R12
+    mov I10, 0
+tk_l:
+    bge I10, I0, tk_done
+    bge I10, I9, tk_done
+    mov R18, R12[I10]
+    inc I10
+    mov F1, R18[0]
+    mov I11, R18[1]
+    mov R19, R9[I11]
+    mnew R20
+    mget.r R21, R19, "id", ""
+    mget.r R22, R19, "text", ""
+    mset R20, "id", R21
+    mset R20, "text", R22
+    call core.mk_float (F1) -> (R23)
+    mset R20, "score", R23
+    mhas I12, R19, "meta"
+    bz I12, tk_push
+    mget.r R24, R19, "meta", null
+    mset R20, "meta", R24
+tk_push:
+    lpush R17, R20
+    jmp tk_l
+tk_done:
+    ret R17
+
+empty_res:
+    lnew R17
+    ret R17
+.endf
+
+.func kb_size(ref self_v, ref args, ref block) -> ref
+    mget I0, self_v->core.AilObj.fields, "__rows__", 0
+    call core.mk_int (I0) -> (R3)
+    ret R3
+.endf
+
+; ---- Module init & Knowledge.new ----
+
+.func init
+    bnz @inited, 9f
+    call core.mk_class ("Knowledge", null) -> (R0)
+    closure kb_ingest () -> (R1)
+    call core.class_def_method (R0, "ingest", R1)
+    call core.class_def_method (R0, "add", R1)
+    closure kb_search () -> (R1)
+    call core.class_def_method (R0, "search", R1)
+    closure kb_size () -> (R1)
+    call core.class_def_method (R0, "size", R1)
+    call core.class_def_method (R0, "count", R1)
+    mov @kb_cls, R0
+    mov @inited, 1
+9:  ret
+.endf
+
+; new_knowledge(args) -> Knowledge AilObj
+; Accepts Knowledge.new(:kb) or Knowledge.new(vector_db: :kb, embedder: :docs)
+.func new_knowledge(ref args) -> ref
+    bnz @inited, 1f
+    call init ()
+1:  mov R1, null                      ; vector_db binding name
+    mov R2, null                      ; embedder override
+    bz.r args, resolve_cfg
+    len I0, args
+    bz I0, resolve_cfg
+    mov R3, args[0]
+    typeof I1, R3
+    beq I1, 6, from_kw
+    mov R1, R3
+    jmp resolve_cfg
+from_kw:
+    mget.r R1, R3, "vector_db", null
+    mget.r R2, R3, "embedder", null
+
+resolve_cfg:
+    mov I2, 1                         ; metric: 0=dot, 1=cosine, 2=l2
+    bz.r R1, make_kb
+    call core.to_str (R1) -> (R4)
+    call cfg.get_binding_raw ("vector_db", R4) -> (R5)
+    bz.r R5, make_kb
+    bnz.r R2, chk_metric
+    mget.r R2, R5, "embedder", null
+chk_metric:
+    mget.r R6, R5, "metric", "cosine"
+    strcmp I3, R6, "dot"
+    bnz I3, chk_l2
+    mov I2, 0
+    jmp make_kb
+chk_l2:
+    strcmp I3, R6, "l2"
+    bnz I3, make_kb
+    mov I2, 2
+
+make_kb:
+    mov R7, @kb_cls
+    call core.mk_obj (R7) -> (R8)
+    mset R8->core.AilObj.fields, "__embedder__", R2
+    mset R8->core.AilObj.fields, "__metric__", I2
+    mset R8->core.AilObj.fields, "__dim__", 0
+    mset R8->core.AilObj.fields, "__rows__", 0
+    mset R8->core.AilObj.fields, "__cap__", 0
+    mov R9, null
+    mset R8->core.AilObj.fields, "__mat__", R9
+    lnew R10
+    mset R8->core.AilObj.fields, "__docs__", R10
+    ret R8
+.endf

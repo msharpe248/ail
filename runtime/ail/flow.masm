@@ -1,0 +1,242 @@
+; ail.flow - Stateful graph execution runtime for `flow Name ... end`
+; Executes start node, inline decide nodes, handler/agent/tool/function nodes,
+; conditional when/unless edges, and runtime-enforced `max:` cycle counters.
+
+.module ail.flow
+.import ail.core as core
+.import ail.s1 as s1
+.import ail.context as ctxmod
+.export init, mk_flow, run_flow
+
+inited:   .i64 0
+flow_cls: .zero 8
+
+; Call a node handler (Agent, Tool, Closure, Decide descriptor, or env-bound fn)
+.func invoke_handler(ref handler, ref state_val, ref ctx) -> ref
+    bz.r handler, pass_through
+    ; Decide node map: {"__decide__": 1, "model": ..., "schema": ...}
+    typeof I0, handler
+    bne I0, 6, chk_obj
+    mhas I1, handler, "__decide__"
+    bz I1, pass_through
+    mget.r R3, handler, "model", null
+    mget.r R4, handler, "schema", "{}"
+    ; Extract input text: if state is AilObj/map with "body" or "text" or "input", use that; else to_str
+    mov R5, state_val
+    bisa state_val, core.AilObj, dec_obj_in
+    typeof I2, state_val
+    beq I2, 6, dec_map_in
+    jmp dec_go
+dec_obj_in:
+    mov R6, state_val->core.AilObj.fields
+    jmp dec_find_txt
+dec_map_in:
+    mov R6, state_val
+dec_find_txt:
+    mhas I3, R6, "body"
+    bz I3, dft1
+    mget.r R5, R6, "body", state_val
+    jmp dec_go
+dft1:
+    mhas I3, R6, "text"
+    bz I3, dft2
+    mget.r R5, R6, "text", state_val
+    jmp dec_go
+dft2:
+    mhas I3, R6, "input"
+    bz I3, dec_go
+    mget.r R5, R6, "input", state_val
+dec_go:
+    call s1.run_decide (R3, R5, R4) -> (R7)
+    ret R7
+
+chk_obj:
+    ; Agent or Flow AilObj -> call .run(state, {context: ctx})
+    bnisa handler, core.AilObj, chk_callable
+    lnew R3
+    mnew R4
+    mset R4, "context", ctx
+    lpush R3, state_val, R4
+    call core.send_msg (handler, "run", R3, null) -> (R5)
+    ret R5
+
+chk_callable:
+    lnew R3
+    lpush R3, state_val
+    call core.call_val (handler, R3, null) -> (R4)
+    ret R4
+
+pass_through:
+    ret state_val
+.endf
+
+; Evaluate an edge's condition closure against (last_out, state)
+; Note: invert is I0 -> use I1 for truthiness result!
+.func check_edge_cond(ref cond_fn, i64 invert, ref last_out, ref state_val) -> i64
+    bz.r cond_fn, cond_yes
+    lnew R4
+    lpush R4, last_out, state_val
+    call core.call_val (cond_fn, R4, null) -> (R5)
+    call core.is_truthy (R5) -> (I1)
+    bz invert, ret_i
+    seq I1, I1, 0
+ret_i:
+    ret I1
+cond_yes:
+    ret 1
+.endf
+
+; run_flow(flow_obj, initial_state, opts) -> final state / output
+.func run_flow(ref fl, ref init_state, ref opts) -> ref
+    mov R3, fl->core.AilObj.fields
+    mget.r R4, R3, "start", null
+    bz.r R4, no_start
+    mget.r R5, R3, "nodes", null      ; map: node_name -> handler_or_null
+    mget.r R6, R3, "edges", null      ; list of edge maps: {from, to, cond, invert, max}
+    mget.r R7, R3, "env", null        ; defining lexical env (for resolving node handlers by name!)
+
+    ; Context
+    mov R8, null
+    bz.r opts, mk_ctx
+    typeof I0, opts
+    bne I0, 6, mk_ctx
+    mget.r R8, opts, "context", null
+mk_ctx:
+    bnz.r R8, have_ctx
+    lnew R9
+    call ctxmod.new_ctx (R9) -> (R8)
+have_ctx:
+
+    mov R10, R4                       ; current node name
+    mov R11, init_state               ; current state
+    mov R12, init_state               ; last node output (for decide edge routing)
+    mnew R13                          ; edge traversal counts map: edge_idx_str -> i64
+    mov I1, 0                         ; total step counter (safety bound = 200)
+
+step_loop:
+    bge I1, 200, too_many_steps
+    inc I1
+
+    ; Telemetry
+    ncall "monitor.on" -> (I2)
+    bz I2, find_handler
+    mnew R14
+    mget.r R15, R3, "name", ""
+    mset R14, "flow", R15
+    mset R14, "node", R10
+    mset R14, "step", I1
+    ncall "monitor.event" ("ail.flow.step", R14)
+
+find_handler:
+    mov R14, null
+    bz.r R5, try_env_fn
+    mhas I3, R5, R10
+    bz I3, try_env_fn
+    mget.r R14, R5, R10, null
+    bnz.r R14, exec_node
+try_env_fn:
+    bz.r R7, exec_node
+    call core.env_get (R7, R10) -> (I4, R15)
+    bz I4, exec_node
+    mov R14, R15
+
+exec_node:
+    mov I5, 0                         ; was_decide = 0
+    bz.r R14, do_exec
+    typeof I6, R14
+    bne I6, 6, do_exec
+    mhas I5, R14, "__decide__"
+do_exec:
+    call invoke_handler (R14, R11, R8) -> (R16)
+    mov R12, R16
+    ; For non-decide nodes, update state to the node's returned value (unless null)
+    bnz I5, pick_edge
+    bz.r R16, pick_edge
+    mov R11, R16
+
+pick_edge:
+    bz.r R6, done
+    len I7, R6
+    mov I8, 0
+edge_loop:
+    bge I8, I7, done                  ; no outgoing matching edge -> terminal node!
+    mov R17, R6[I8]
+    mget.r R18, R17, "from", ""
+    strcmp I9, R18, R10
+    bnz I9, edge_next
+
+    ; Check max traversal bound on this edge
+    mget.r R19, R17, "max", null
+    bz.r R19, chk_cond
+    call core.to_i64 (R19) -> (I10)   ; max allowed traversals
+    tostr R20, I8
+    mget I11, R13, R20, 0
+    bge I11, I10, edge_next           ; max reached -> skip edge (allows fallthrough to exit edge)
+
+chk_cond:
+    mget.r R21, R17, "cond", null
+    mget I12, R17, "invert", 0
+    ; Pass last_out if decide node, else state (plus second arg state)
+    mov R22, R11
+    bz I5, 1f
+    mov R22, R12
+1:  call check_edge_cond (R21, I12, R22, R11) -> (I13)
+    bz I13, edge_next
+
+    ; Take this edge! Increment edge counter and transition to `to`
+    tostr R20, I8
+    mget I11, R13, R20, 0
+    inc I11
+    mset R13, R20, I11
+    mget.r R10, R17, "to", ""
+    jmp step_loop
+
+edge_next:
+    inc I8
+    jmp edge_loop
+
+done:
+    ret R11
+
+no_start:
+    call core.mk_exc ("FlowError", "flow has no start node") -> (R25)
+    throw R25
+
+too_many_steps:
+    call core.mk_exc ("BudgetExceeded", "flow exceeded maximum step limit (200)") -> (R25)
+    throw R25
+.endf
+
+; ---- Flow AilClass ----
+
+.func flow_run_method(ref self_v, ref args, ref block) -> ref
+    mov R3, null
+    mov R4, null
+    len I0, args
+    bz I0, 1f
+    mov R3, args[0]
+    blt I0, 2, 1f
+    mov R4, args[1]
+1:  call run_flow (self_v, R3, R4) -> (R5)
+    ret R5
+.endf
+
+.func init
+    bnz @inited, 9f
+    call core.mk_class ("Flow", null) -> (R0)
+    closure flow_run_method () -> (R1)
+    call core.class_def_method (R0, "run", R1)
+    mov @flow_cls, R0
+    mov @inited, 1
+9:  ret
+.endf
+
+.func mk_flow(ref name, ref fields) -> ref
+    bnz @inited, 1f
+    call init ()
+1:  mov R2, @flow_cls
+    call core.mk_obj (R2) -> (R3)
+    mset fields, "name", name
+    mov R3->core.AilObj.fields, fields
+    ret R3
+.endf

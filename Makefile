@@ -25,6 +25,7 @@ test: ail
 
 test-ollama: ail
 	MLWSVM="$(MLWSVM)" ./ail run examples/agent_ollama.ail --env examples/ollama.ail.env
+	MLWSVM="$(MLWSVM)" ./ail run examples/flow_ollama.ail --env examples/ollama_v03.ail.env
 
 check-examples: ail
 	@for f in examples/*.ail; do \

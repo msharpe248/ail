@@ -7,9 +7,9 @@
 
 .export AilInt, AilFloat, AilBool, AilSym, AilDur, AilRange, AilRegex
 .export AilClosure, AilClass, AilObj, AilCell, AilExc, AilTool, AilGuard
-.export AilGuardResult, AilSchema, AilBudget, AilContext
+.export AilGuardResult, AilSchema, AilBudget, AilContext, AilDecideVal
 .export init, mk_int, mk_float, mk_bool, mk_sym, mk_dur, mk_range, mk_regex
-.export mk_closure, mk_cell, cell_get, cell_set, mk_exc
+.export mk_closure, mk_cell, cell_get, cell_set, mk_exc, mk_decide_val
 .export mk_class, class_def_method, mk_obj, mk_schema, mk_tool, mk_guard, mk_context
 .export is_truthy, to_str, to_i64, to_f64, wrap_json, unwrap_json
 .export exc_matches, exc_message
@@ -118,6 +118,12 @@
     views: ref        ; map: view_name -> closure
 .ends
 
+.struct AilDecideVal
+    value: ref        ; AilSym (choice), AilInt (score), or AilFloat (prob)
+    confidence: f64   ; calibrated confidence 0.0..1.0
+    probs: ref        ; optional map of option -> AilFloat
+.ends
+
 ; ---- Module globals ----
 
 inited:   .i64 0
@@ -216,6 +222,14 @@ bool_f:   .zero 8
     mov R2->AilExc.message, msg
     mov R2->AilExc.data, null
     ret R2
+.endf
+
+.func mk_decide_val(ref val, f64 conf, ref probs) -> ref
+    new R3, AilDecideVal
+    mov R3->AilDecideVal.value, val
+    mov R3->AilDecideVal.confidence, conf
+    mov R3->AilDecideVal.probs, probs
+    ret R3
 .endf
 
 .func mk_class(ref name, ref parent) -> ref
@@ -353,6 +367,7 @@ zero:
     bisa v, AilFloat, is_flt
     bisa v, AilBool, is_bool
     bisa v, AilSym, is_sym
+    bisa v, AilDecideVal, is_dval
     bisa v, AilDur, is_dur
     bisa v, AilRange, is_rng
     bisa v, AilClass, is_cls
@@ -386,6 +401,9 @@ b_f:
     ret "false"
 is_sym:
     ret v->AilSym.name
+is_dval:
+    call to_str (v->AilDecideVal.value) -> (R1)
+    ret R1
 is_dur:
     tostr R1, v->AilDur.ms
     strcat R2, R1, "ms"
@@ -923,6 +941,15 @@ n_d:
     beq.r a, b, eq_yes
     bz.r a, eq_no
     bz.r b, eq_no
+    bisa a, AilDecideVal, e_dval_a
+    bisa b, AilDecideVal, e_dval_b
+    jmp e_cont
+e_dval_a:
+    mov a, a->AilDecideVal.value
+    bnisa b, AilDecideVal, e_cont
+e_dval_b:
+    mov b, b->AilDecideVal.value
+e_cont:
     bisa a, AilInt, e_int
     bisa a, AilFloat, e_flt
     bisa a, AilBool, e_bool
@@ -983,6 +1010,12 @@ eq_no:
 .endf
 
 .func cmp_raw(ref a, ref b) -> i64
+    bnisa a, AilDecideVal, c_chk_b
+    mov a, a->AilDecideVal.value
+c_chk_b:
+    bnisa b, AilDecideVal, c_go
+    mov b, b->AilDecideVal.value
+c_go:
     bisa a, AilInt, c_int
     typeof I0, a
     beq I0, 1, c_str
@@ -1353,6 +1386,7 @@ chk_dispatch:
     bisa recv, AilRange, m_range
     bisa recv, AilClosure, m_closure
     bisa recv, AilExc, m_exc
+    bisa recv, AilDecideVal, m_dval
     typeof I0, recv
     beq I0, 1, m_str
     beq I0, 5, m_list
@@ -1738,6 +1772,21 @@ me_cls:
     strcmp I1, name, "class_name"
     bnz I1, no_method
     ret recv->AilExc.klass
+
+; -- System 1 DecideVal (.value, .confidence, .probs) --
+m_dval:
+    strcmp I1, name, "value"
+    bnz I1, mdv_conf
+    ret recv->AilDecideVal.value
+mdv_conf:
+    strcmp I1, name, "confidence"
+    bnz I1, mdv_probs
+    call mk_float (recv->AilDecideVal.confidence) -> (R4)
+    ret R4
+mdv_probs:
+    strcmp I1, name, "probs"
+    bnz I1, no_method
+    ret recv->AilDecideVal.probs
 
 ; -- Range methods (.each, .map, .to_a, .include?, .size) --
 m_range:
