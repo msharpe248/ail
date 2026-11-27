@@ -50,6 +50,12 @@ pass "check examples/stream_ollama.ail"
 $AIL check examples/support_desk/main.ail >/dev/null || fail "check support_desk/main.ail"
 pass "check examples/support_desk/main.ail"
 
+$AIL check examples/chatbot/main.ail >/dev/null || fail "check chatbot/main.ail"
+pass "check examples/chatbot/main.ail"
+
+$AIL check examples/coding_harness/main.ail >/dev/null || fail "check coding_harness/main.ail"
+pass "check examples/coding_harness/main.ail"
+
 if $AIL check tests/bad_unbounded_cycle.ail >/dev/null 2>&1; then
     fail "bad_unbounded_cycle.ail should have been rejected"
 else
@@ -271,6 +277,33 @@ REPL_OUT=$(printf 'x = 21\nx * 2\n[3, 1, 2, 1].uniq.sort\n:quit\n' | $AIL repl)
 echo "$REPL_OUT" | grep -q '=> 42' || fail "repl arithmetic ($REPL_OUT)"
 echo "$REPL_OUT" | grep -q '=> \[1, 2, 3\]' || fail "repl stdlib inspect ($REPL_OUT)"
 pass "ail repl evaluates expressions, persists state, and formats via .inspect"
+
+echo "=== 12. Interactive Streaming Chatbot (examples/chatbot/) ==="
+CHAT_OUT=$(printf 'Hi there!\n/checkpoint\nDo you remember me?\n/history\n/rewind\n/history\n/quit\n' \
+  | $AIL run examples/chatbot/main.ail --env examples/chatbot/mock.ail.env)
+echo "$CHAT_OUT" | grep -q 'Hello! I am an AIL chatbot running on MLWSVM.' || fail "chatbot turn 1 ($CHAT_OUT)"
+echo "$CHAT_OUT" | grep -q 'Yes, I remember our conversation' || fail "chatbot turn 2 ($CHAT_OUT)"
+echo "$CHAT_OUT" | grep -q 'History (4 events)' || fail "chatbot history before rewind ($CHAT_OUT)"
+echo "$CHAT_OUT" | grep -q 'History (2 events)' || fail "chatbot history after rewind ($CHAT_OUT)"
+pass "examples/chatbot/ multi-turn streaming, history, checkpoint & rewind"
+
+echo "=== 13. Coding Agent TUI Harness (examples/coding_harness/) ==="
+rm -f build/harness_demo.txt
+DENY_OUT=$(printf 'Update the demo file\nn\nn\n/quit\n' \
+  | $AIL run examples/coding_harness/main.ail --env examples/coding_harness/mock.ail.env)
+echo "$DENY_OUT" | grep -q 'Denied by user' || fail "harness deny guard ($DENY_OUT)"
+test ! -e build/harness_demo.txt || fail "harness wrote file despite denial"
+pass "examples/coding_harness/ interactive approval guard blocks denied writes"
+
+HARN_OUT=$(printf '/tools\nUpdate the demo file\ny\ny\n/quit\n' \
+  | $AIL run examples/coding_harness/main.ail --env examples/coding_harness/mock.ail.env)
+echo "$HARN_OUT" | grep -q 'read_file' || fail "harness /tools & read_file ($HARN_OUT)"
+echo "$HARN_OUT" | grep -q 'Wrote build/harness_demo.txt' || fail "harness write_file ($HARN_OUT)"
+echo "$HARN_OUT" | grep -q 'Edited build/harness_demo.txt' || fail "harness edit_file ($HARN_OUT)"
+echo "$HARN_OUT" | grep -q 'updated build/harness_demo.txt to v0.5' || fail "harness streamed reply ($HARN_OUT)"
+grep -q 'AIL harness demo v0.5' build/harness_demo.txt || fail "harness_demo.txt content mismatch"
+rm -f build/harness_demo.txt
+pass "examples/coding_harness/ end-to-end sandboxed read/write/edit + live tool hooks"
 
 echo ""
 echo "All $PASS tests passed!"

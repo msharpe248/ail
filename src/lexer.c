@@ -96,17 +96,35 @@ static TokKind lookup_keyword(const char *s, size_t n) {
     return TOK_IDENT;
 }
 
+static int hex_val(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+    if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+    return -1;
+}
+
 static char parse_escape(Lexer *lx) {
     char c = advance(lx);
     switch (c) {
         case 'n':  return '\n';
         case 'r':  return '\r';
         case 't':  return '\t';
+        case 'e':  return '\x1b';
         case '0':  return '\0';
         case '\\': return '\\';
         case '"':  return '"';
         case '\'': return '\'';
         case '#':  return '#';
+        case 'x': {
+            int h1 = hex_val(peek(lx, 0));
+            int h2 = hex_val(peek(lx, 1));
+            if (h1 >= 0 && h2 >= 0) {
+                advance(lx);
+                advance(lx);
+                return (char)((h1 << 4) | h2);
+            }
+            return 'x';
+        }
         default:   return c;
     }
 }

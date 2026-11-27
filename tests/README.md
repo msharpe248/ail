@@ -5,7 +5,7 @@
 From the repository root:
 
 ```sh
-# 26 deterministic end-to-end tests (no external APIs or network required)
+# 31 deterministic end-to-end tests (no external APIs or network required)
 make test
 
 # Live end-to-end tests against a local Ollama server (http://127.0.0.1:11434)
@@ -28,3 +28,5 @@ make test-ollama
 8. **Standalone Bundle (`ail bundle`):** Builds and executes a self-contained binary.
 9. **Multi-file App & Expanded Stdlib:** Full execution of [`examples/support_desk/main.ail`](../examples/support_desk/main.ail).
 10. **Interactive REPL (`ail repl`):** Scripted session verifying expression evaluation, state persistence, and `.inspect` formatting.
+11. **Interactive Chatbot ([`examples/chatbot/`](../examples/chatbot/README.md)):** Multi-turn streaming conversation, `:audit` history inspection, `/checkpoint`, and `/rewind`.
+12. **Coding Agent TUI Harness ([`examples/coding_harness/`](../examples/coding_harness/README.md)):** Interactive `[y/N]` write-approval guard (both denial and approval), sandboxed `read_file`/`write_file`/`edit_file`, and live `on_tool_call`/`on_tool_result` hooks.

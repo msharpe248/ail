@@ -772,6 +772,19 @@ static bool is_assign_op(TokKind k) {
 static Node *parse_expr(Parser *p) {
     Node *lhs = parse_binary(p, 1);
 
+    /* Ternary operator: cond ? then_expr : else_expr */
+    if (at(p, TOK_QMARK)) {
+        Span sp = bump(p)->span;
+        Node *then_e = parse_expr(p);
+        expect(p, TOK_COLON, "':' in ternary expression");
+        Node *else_e = parse_expr(p);
+        Node *n = node_new(p->arena, ND_IF, sp);
+        n->u.if_nd.cond = lhs;
+        nodelist_push(p->arena, &n->u.if_nd.then_body, then_e);
+        nodelist_push(p->arena, &n->u.if_nd.else_body, else_e);
+        return n;
+    }
+
     /* Assignment */
     if (is_assign_op(cur(p)->kind)) {
         const Token *op = bump(p);

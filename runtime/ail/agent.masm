@@ -137,9 +137,28 @@ ret_orig:
     ret R1
 .endf
 
+; Optional lifecycle callback helper (runs in a fresh register window so caller regs stay intact)
+.func notify_cb(ref cb, ref a1, ref a2, ref a3, i64 argc)
+    bz.r cb, 9f
+    lnew R5
+    blt argc, 1, 1f
+    lpush R5, a1
+    blt argc, 2, 1f
+    lpush R5, a2
+    blt argc, 3, 1f
+    lpush R5, a3
+1:  call core.call_val (cb, R5, null) -> (R6)
+9:  ret
+.endf
+
 ; ---- Core Agent execution loop ----
 
 .func run_agent(ref ag, ref input_val, ref opts) -> ref
+    enter 4
+    mov.r LOC[0], null                ; on_turn
+    mov.r LOC[1], null                ; on_tool_call
+    mov.r LOC[2], null                ; on_tool_result
+    mov.r LOC[3], null                ; on_guard
     mov R3, ag->core.AilObj.fields
     mget.r R4, R3, "model", null
     bz.r R4, no_model
@@ -153,12 +172,20 @@ ret_orig:
     mget.r R12, R3, "limits", null
     mget.r R13, R3, "returns", null
 
-    ; Resolve or create Context
+    ; Resolve or create Context + optional lifecycle callbacks
     mov R14, null
     bz.r opts, mk_fresh_ctx
     typeof I0, opts
     bne I0, 6, mk_fresh_ctx
     mget.r R14, opts, "context", null
+    mget.r R15, opts, "on_turn", null
+    mov.r LOC[0], R15
+    mget.r R15, opts, "on_tool_call", null
+    mov.r LOC[1], R15
+    mget.r R15, opts, "on_tool_result", null
+    mov.r LOC[2], R15
+    mget.r R15, opts, "on_guard", null
+    mov.r LOC[3], R15
 mk_fresh_ctx:
     bnz.r R14, have_ctx
     lnew R15
@@ -302,6 +329,10 @@ loop_ready:
 turn_loop:
     bge I14, I1, max_turns_err
     inc I14
+    bz.r LOC[0], 1f
+    call core.mk_int (I14) -> (R24)
+    call notify_cb (LOC[0], R24, null, null, 1)
+1:
 
     ; Project context view -> messages
     call ctxmod.project_view (R14, R10) -> (R24)
@@ -384,6 +415,9 @@ exec_tc_loop:
     mget.r R20, R25, "arguments", null
     call core.wrap_json (R20) -> (R15)
 
+    ; Notify on_tool_call(name, args)
+    call notify_cb (LOC[1], R27, R15, null, 2)
+
     ; Run check_tool guards
     mnew R16
     mset R16, "name", R27
@@ -405,17 +439,26 @@ tc_run_it:
     call core.invoke_tool_with_caps (R24, R15, R30) -> (R17)
 .endtry
     call core.to_str (R17) -> (R18)
+    call core.mk_bool (1) -> (R24)
+    call notify_cb (LOC[2], R27, R18, R24, 3)
     jmp tc_record
 tc_exec_err:
     catch R17
     call core.exc_message (R17) -> (R18)
     strcat R18, "Error: ", R18
+    call core.mk_bool (0) -> (R24)
+    call notify_cb (LOC[2], R27, R18, R24, 3)
     jmp tc_record
 tc_missing:
     strcat R18, "Error: unknown tool '", R27, "'"
+    call core.mk_bool (0) -> (R24)
+    call notify_cb (LOC[2], R27, R18, R24, 3)
     jmp tc_record
 tc_guard_rej:
+    call notify_cb (LOC[3], "tool", "reject", R18, 3)
     strcat R18, "Tool call blocked by guard: ", R18
+    call core.mk_bool (0) -> (R24)
+    call notify_cb (LOC[2], R27, R18, R24, 3)
 tc_record:
     ; Append native tool result message for LLM + intermediate audit event
     mnew R30

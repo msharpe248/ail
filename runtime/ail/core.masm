@@ -129,6 +129,8 @@
 inited:   .i64 0
 bool_t:   .zero 8
 bool_f:   .zero 8
+stdin_h:  .zero 8
+stderr_h: .zero 8
 
 .func init
     bnz @inited, 1f
@@ -1336,12 +1338,15 @@ wd_loop:
     strcmp I2, R3, ".git"
     bz I2, wd_loop
     ncall "path.join" (dir, R3) -> (R4)
-.try wd_loop
+.try wd_skip
     ncall "fs.stat" (R4) -> (R5)
 .endtry
     mov I3, R5->FileInfo.kind
     beq I3, 2, wd_sub
     beq I3, 1, wd_file
+    jmp wd_loop
+wd_skip:
+    catch R9
     jmp wd_loop
 wd_sub:
     call walk_dir (R4, out_list)
@@ -2606,7 +2611,7 @@ bp_ret:
 
 b_print:
     strcmp I0, name, "print"
-    bnz I0, b_ro
+    bnz I0, b_eputs
     len I1, args
     mov I2, 0
 bpr_l:
@@ -2619,6 +2624,40 @@ bpr_l:
 bpr_d:
     ncall "io.flush"
     ret null
+
+b_eputs:
+    strcmp I0, name, "eputs"
+    bnz I0, b_gets
+    mov R5, @stderr_h
+    bnz.r R5, 1f
+    ncall "fs.stderr" -> (R5)
+    mov @stderr_h, R5
+1:  len I1, args
+    mov I2, 0
+bep_l:
+    bge I2, I1, bep_d
+    mov R3, args[I2]
+    call to_str (R3) -> (R4)
+    strcat R4, R4, "\n"
+    ncall "fs.write" (R5, R4)
+    inc I2
+    jmp bep_l
+bep_d:
+    bnz I1, bep_r
+    ncall "fs.write" (R5, "\n")
+bep_r:
+    ret null
+
+b_gets:
+    strcmp I0, name, "gets"
+    bnz I0, b_ro
+    ncall "io.flush"
+    mov R3, @stdin_h
+    bnz.r R3, 1f
+    ncall "fs.stdin" -> (R3)
+    mov @stdin_h, R3
+1:  ncall "fs.read_line" (R3) -> (R4)
+    ret R4
 
 b_ro:
     strcmp I0, name, "read_only"
@@ -2899,9 +2938,136 @@ b_rand_flt:
 
 b_rand_seed:
     strcmp I0, name, "Random.seed"
-    bnz I0, b_unknown
+    bnz I0, b_file_cwd
     call to_i64 (args[0]) -> (I1)
     ncall "random.seed" (I1)
+    ret null
+
+b_file_cwd:
+    strcmp I0, name, "File.cwd"
+    bnz I0, b_file_mkdir
+    ncall "fs.cwd" -> (R3)
+    ret R3
+
+b_file_mkdir:
+    strcmp I0, name, "File.mkdir"
+    bnz I0, b_file_del
+    call to_str (args[0]) -> (R3)
+    ncall "fs.mkdir" (R3)
+    ret null
+
+b_file_del:
+    strcmp I0, name, "File.delete"
+    bnz I0, b_file_dir
+    call to_str (args[0]) -> (R3)
+    ncall "fs.remove" (R3)
+    ret null
+
+b_file_dir:
+    strcmp I0, name, "File.dir?"
+    bnz I0, b_file_size
+    call to_str (args[0]) -> (R3)
+.try bfd_no
+    ncall "fs.stat" (R3) -> (R4)
+.endtry
+    mov I1, R4->FileInfo.kind
+    seq I2, I1, 2
+    call mk_bool (I2) -> (R5)
+    ret R5
+bfd_no:
+    catch R9
+    call mk_bool (0) -> (R5)
+    ret R5
+
+b_file_size:
+    strcmp I0, name, "File.size"
+    bnz I0, b_path_join
+    call to_str (args[0]) -> (R3)
+    ncall "fs.stat" (R3) -> (R4)
+    mov I1, R4->FileInfo.size
+    call mk_int (I1) -> (R5)
+    ret R5
+
+b_path_join:
+    strcmp I0, name, "Path.join"
+    bnz I0, b_path_norm
+    call to_str (args[0]) -> (R3)
+    call to_str (args[1]) -> (R4)
+    ncall "path.join" (R3, R4) -> (R5)
+    ret R5
+
+b_path_norm:
+    strcmp I0, name, "Path.normalize"
+    bnz I0, b_path_dir
+    call to_str (args[0]) -> (R3)
+    ncall "path.normalize" (R3) -> (R4)
+    ret R4
+
+b_path_dir:
+    strcmp I0, name, "Path.dirname"
+    bnz I0, b_path_base
+    call to_str (args[0]) -> (R3)
+    ncall "path.dirname" (R3) -> (R4)
+    ret R4
+
+b_path_base:
+    strcmp I0, name, "Path.basename"
+    bnz I0, b_path_ext
+    call to_str (args[0]) -> (R3)
+    ncall "path.basename" (R3) -> (R4)
+    ret R4
+
+b_path_ext:
+    strcmp I0, name, "Path.ext"
+    bnz I0, b_os_args
+    call to_str (args[0]) -> (R3)
+    ncall "path.ext" (R3) -> (R4)
+    ret R4
+
+b_os_args:
+    strcmp I0, name, "OS.args"
+    bnz I0, b_os_plat
+    ncall "os.args" -> (R3)
+    ret R3
+
+b_os_plat:
+    strcmp I0, name, "OS.platform"
+    bnz I0, b_os_run
+    ncall "os.platform" -> (R3)
+    ret R3
+
+b_os_run:
+    strcmp I0, name, "OS.run"
+    bnz I0, b_os_exit
+    ; Accepts an Array of strings, e.g. ["git", "status", "-s"]
+    mov R3, args[0]
+    lnew R4
+    len I1, R3
+    mov I2, 0
+bor_l:
+    bge I2, I1, bor_go
+    mov R5, R3[I2]
+    call to_str (R5) -> (R6)
+    lpush R4, R6
+    inc I2
+    jmp bor_l
+bor_go:
+    ncall "os.run" (R4) -> (I3, R7)
+    strcat R8, R7
+    call mk_int (I3) -> (R9)
+    mnew R10
+    mset R10, "status", R9
+    mset R10, "output", R8
+    ret R10
+
+b_os_exit:
+    strcmp I0, name, "OS.exit"
+    bnz I0, b_unknown
+    mov I1, 0
+    len I2, args
+    bz I2, 1f
+    call to_i64 (args[0]) -> (I1)
+1:  ncall "os.exit" (I1)
     ret null
 
 b_unknown:
@@ -2962,6 +3128,10 @@ es_local:
     strcmp I0, name, "puts"
     bz I0, hb_y
     strcmp I0, name, "print"
+    bz I0, hb_y
+    strcmp I0, name, "eputs"
+    bz I0, hb_y
+    strcmp I0, name, "gets"
     bz I0, hb_y
     strcmp I0, name, "read_only"
     bz I0, hb_y

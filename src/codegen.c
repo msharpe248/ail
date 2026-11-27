@@ -218,6 +218,7 @@ static bool is_stdlib_module_call(const Node *c, char *out_buf, size_t cap) {
     if (!c->u.call.recv || c->u.call.recv->kind != ND_IDENT) return false;
     const char *m = c->u.call.recv->u.ident.name;
     if (strcmp(m, "File") == 0 || strcmp(m, "Files") == 0 ||
+        strcmp(m, "Path") == 0 || strcmp(m, "OS") == 0 ||
         strcmp(m, "JSON") == 0 || strcmp(m, "Config") == 0 ||
         strcmp(m, "Context") == 0 || strcmp(m, "Env") == 0 ||
         strcmp(m, "Time") == 0 || strcmp(m, "Math") == 0 ||

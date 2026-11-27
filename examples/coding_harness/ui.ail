@@ -1,0 +1,85 @@
+# examples/coding_harness/ui.ail — ANSI terminal UI helpers for the coding harness
+
+def c_bold(s)
+  "\e[1m#{s}\e[0m"
+end
+
+def c_dim(s)
+  "\e[2m#{s}\e[0m"
+end
+
+def c_cyan(s)
+  "\e[36m#{s}\e[0m"
+end
+
+def c_green(s)
+  "\e[32m#{s}\e[0m"
+end
+
+def c_yellow(s)
+  "\e[33m#{s}\e[0m"
+end
+
+def c_red(s)
+  "\e[31m#{s}\e[0m"
+end
+
+def c_magenta(s)
+  "\e[35m#{s}\e[0m"
+end
+
+def ui_rule(width = 68)
+  c_dim("─" * width)
+end
+
+def ui_banner(model, workspace, auto_approve)
+  mode = auto_approve ? c_yellow("auto-approve") : c_green("ask-on-write")
+  puts ""
+  puts c_cyan("╭" + ("─" * 66) + "╮")
+  puts c_cyan("│") + " " + c_bold("AIL Coding Harness") + " " + c_dim("v0.5.0 · sandboxed agent TUI on MLWSVM") + "        " + c_cyan("│")
+  puts c_cyan("├" + ("─" * 66) + "┤")
+  puts "  #{c_dim("Model:")}     #{c_bold(model)}"
+  puts "  #{c_dim("Workspace:")} #{workspace}"
+  puts "  #{c_dim("Sandbox:")}   #{c_green("cap.restrict (./ only, net: none)")} · #{c_dim("Writes:")} #{mode}"
+  puts c_cyan("╰" + ("─" * 66) + "╯")
+  puts c_dim("Type a coding request, or /help, /files, /tools, /history, /approve, /quit")
+  puts ""
+end
+
+def ui_truncate(s, max_len = 120)
+  flat = s.gsub("\n", " ").strip
+  if flat.size > max_len
+    flat.slice(0, max_len) + "..."
+  else
+    flat
+  end
+end
+
+def ui_tool_start(name, args)
+  arg_str = ui_truncate(JSON.stringify(args), 90)
+  puts "  #{c_yellow("⚡ tool")}  #{c_bold(name)} #{c_dim(arg_str)}"
+end
+
+def ui_tool_done(name, result, ok)
+  lines = result.lines
+  preview = ui_truncate(result, 88)
+  if ok
+    puts "  #{c_green("✓")} #{c_dim("#{name} (#{lines.size} lines): #{preview}")}"
+  else
+    puts "  #{c_red("✗")} #{c_red("#{name}: #{preview}")}"
+  end
+end
+
+def ui_help
+  puts ""
+  puts c_bold("Slash Commands:")
+  puts "  #{c_cyan("/files [dir]")}   List workspace files"
+  puts "  #{c_cyan("/tools")}         Show available VM-sandboxed coding tools"
+  puts "  #{c_cyan("/history")}       Inspect lossless :audit event log"
+  puts "  #{c_cyan("/checkpoint")}    Save a conversation checkpoint"
+  puts "  #{c_cyan("/rewind")}        Rewind conversation to last checkpoint"
+  puts "  #{c_cyan("/approve")}       Toggle interactive approval vs auto-approve for edits"
+  puts "  #{c_cyan("/clear")}         Start a fresh session context"
+  puts "  #{c_cyan("/quit")}          Exit the coding harness"
+  puts ""
+end

@@ -1,0 +1,107 @@
+# examples/chatbot/main.ail — Interactive streaming chatbot in AIL
+#
+# Run with local Ollama:
+#   ./ail run examples/chatbot/main.ail --env examples/chatbot/ollama.ail.env
+# Run offline with mock driver:
+#   ./ail run examples/chatbot/main.ail --env examples/chatbot/mock.ail.env
+
+use llm: :chat
+
+# Optional safety guardrail: redacts SSNs before showing output
+guard ChatGuard do
+  check_output do |msg, ctx|
+    if msg.match?(/\b\d{3}-\d{2}-\d{4}\b/)
+      return redact(msg.gsub(/\b\d{3}-\d{2}-\d{4}\b/, "[REDACTED]"))
+    end
+    allow
+  end
+end
+
+agent ChatBot do
+  model        :chat
+  context_view :window
+  guards       [ChatGuard]
+  limits       max_turns: 2
+
+  system <<~PROMPT
+    You are a helpful, concise assistant running inside an AIL chatbot.
+    Keep answers clear and direct.
+  PROMPT
+end
+
+# Create an append-only Context with a token-bounded view for the LLM
+def new_chat_context
+  c = Context.new
+  c.define_view :window do |log|
+    log.limit_tokens(6000)
+  end
+  c
+end
+
+cfg = Config.get(:llm, :chat)
+model_label = cfg.fetch("model", cfg.fetch("driver", "unknown"))
+
+puts "\e[1;36mAIL Chat\e[0m \e[2m(#{model_label})\e[0m"
+puts "\e[2mType a message, or /help, /history, /checkpoint, /rewind, /reset, /quit\e[0m"
+puts ""
+
+ctx = new_chat_context()
+saved_cp = nil
+running = true
+
+while running
+  print "\e[1;32myou>\e[0m "
+  line = gets
+  if line == nil
+    puts ""
+    break
+  end
+
+  input = line.strip
+  next if input.empty?
+
+  if input == "/quit" || input == "/exit"
+    puts "\e[2mGoodbye!\e[0m"
+    running = false
+  elsif input == "/help"
+    puts "Commands:"
+    puts "  /history     Show conversation turns in the :audit log"
+    puts "  /checkpoint  Save a checkpoint you can rewind to later"
+    puts "  /rewind      Rewind conversation back to the saved checkpoint"
+    puts "  /reset       Start a fresh conversation"
+    puts "  /quit        Exit chat"
+  elsif input == "/history"
+    events = ctx.view(:audit).to_a
+    puts "\e[2m--- History (#{events.size} events) ---\e[0m"
+    events.each do |ev|
+      kind = ev["kind"]
+      puts "  \e[36m[#{kind}]\e[0m #{ev["payload"]}"
+    end
+  elsif input == "/checkpoint"
+    saved_cp = ctx.checkpoint
+    puts "\e[33mSaved checkpoint at event ##{saved_cp}.\e[0m"
+  elsif input == "/rewind"
+    if saved_cp == nil
+      puts "\e[33mNo checkpoint saved yet. Use /checkpoint first.\e[0m"
+    else
+      ctx.rewind(saved_cp)
+      puts "\e[33mRewound conversation to event ##{saved_cp}.\e[0m"
+    end
+  elsif input == "/reset"
+    ctx = new_chat_context()
+    saved_cp = nil
+    puts "\e[33mConversation reset.\e[0m"
+  else
+    print "\e[1;34mbot>\e[0m "
+    begin
+      ChatBot.stream(input, context: ctx) do |tok|
+        print tok
+      end
+      puts ""
+    rescue GuardViolation => e
+      puts "\e[31m[blocked by guard: #{e.message}]\e[0m"
+    rescue LLMError => e
+      puts "\e[31m[llm error: #{e.message}]\e[0m"
+    end
+  end
+end

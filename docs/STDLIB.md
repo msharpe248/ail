@@ -100,18 +100,31 @@ Exact arbitrary-precision base-10 decimal backed by MLWSVM `.dec`.
 
 ### Global Helpers
 * `puts(a, ...)` — prints each argument followed by a newline.
-* `print(a, ...)` — prints each argument without a trailing newline.
+* `print(a, ...)` — prints each argument without a trailing newline and flushes stdout immediately (`io.flush`).
+* `eputs(a, ...)` — prints each argument followed by a newline to standard error (`fs.stderr`).
+* `gets` — flushes stdout and reads the next line from standard input (`fs.stdin`, without trailing `\n`/`\r\n`), returning `String` or `nil` on EOF.
 * `sleep_ms(ms)` — sleeps the current MLWSVM process for `ms` milliseconds.
 * `read_only(path)`, `read_write(path)` — capability descriptor constructors for `capabilities fs: ...`.
 * `budget(timeout: ..., cost: ..., tokens: ..., turns: ...)` — creates an `AilBudget` for `within`.
 * `allow`, `reject(reason)`, `redact(new_value)`, `escalate(reason)` — guardrail verdict constructors.
 
-### `File` & `Files`
+### `File`, `Files` & `Path`
 * `File.read(path)` → `String`
 * `File.write(path, text)` → `nil`
 * `File.exists?(path)` → `Bool`
+* `File.dir?(path)` → `Bool`
+* `File.size(path)` → `Int` (bytes)
 * `File.list(dir = ".")` → `Array[String]` (sorted)
+* `File.cwd` → `String` (current working directory)
+* `File.mkdir(path)` / `File.delete(path)` → `nil`
 * `Files.glob(pattern = "", dir = ".")` → `Array[String]` (recursive walk, skips `.git`, filters `*.ext`)
+* `Path.join(a, b)`, `Path.normalize(p)`, `Path.dirname(p)`, `Path.basename(p)`, `Path.ext(p)` → `String`
+
+### `OS`
+* `OS.args` → `Array[String]` (command-line arguments after `--`)
+* `OS.platform` → `String` (`"macos"`, `"linux"`, `"windows"`, ...)
+* `OS.run(cmd_array)` → `Hash{"status" => Int, "output" => String}` (obeys `cap.restrict` inside sandboxed tools)
+* `OS.exit(code = 0)` → exits the VM immediately with `code`
 
 ### `JSON`
 * `JSON.parse(text)` → AIL `Hash` / `Array`
@@ -156,8 +169,12 @@ Exact arbitrary-precision base-10 decimal backed by MLWSVM `.dec`.
 * **`LogView` methods:** `.drop(:kind)`, `.limit_tokens(n)`, `.compact_before(-n, using: :model)`, `.size`, `.length`, `.to_a`, `.each`, `.map`, `.select`.
 
 ### `Agent`
-* `MyAgent.run(input, context: ctx, on_token: fn)` — runs full guarded tool/MCP/skill loop.
-* `MyAgent.stream(input, context: ctx) { |tok| ... }` — streams tokens live via MLWSVM 0.30.0 `std.http.open`/`read_chunk`.
+* `MyAgent.run(input, context: ctx, on_token: fn, on_turn: fn, on_tool_call: fn, on_tool_result: fn, on_guard: fn)` — runs full guarded tool/MCP/skill loop.
+* `MyAgent.stream(input, context: ctx, on_tool_call: fn, on_tool_result: fn, ...) { |tok| ... }` — streams tokens live via MLWSVM 0.30.0 `std.http.open`/`read_chunk` while firing real-time tool/turn lifecycle hooks:
+  - `on_turn: ->(turn_num) { ... }`
+  - `on_tool_call: ->(name, args_hash) { ... }`
+  - `on_tool_result: ->(name, result_str, ok_bool) { ... }`
+  - `on_guard: ->(phase, verdict, detail) { ... }`
 
 ### `Flow`
 * `MyFlow.run(initial_state, context: ctx?)` — executes stateful graph from `start` node until a terminal node is reached.

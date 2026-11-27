@@ -1,0 +1,108 @@
+# examples/coding_harness/tools.ail — VM-sandboxed workspace coding tools
+
+tool :list_files, "List files in the workspace directory (optional dir and ext filter like '*.ail')." do
+  param :dir, String = ".", "Relative directory path"
+  param :ext, String = "",  "Optional extension glob like '*.ail' or '*.c'"
+  returns String
+  capabilities fs: read_only("./"), net: :none, run: :none
+
+  files = Files.glob(ext, dir).sort
+  shown = files.take(100)
+  out = shown.join("\n")
+  if files.size > 100
+    out = out + "\n... (#{files.size - 100} more files)"
+  end
+  out.empty? ? "(no matching files)" : out
+end
+
+tool :read_file, "Read a workspace file with 1-based line numbers." do
+  param :path,       String,    "Relative path to the file"
+  param :start_line, Int = 1,   "First line to read (1-indexed)"
+  param :end_line,   Int = 200, "Last line to read (inclusive)"
+  returns String
+  capabilities fs: read_only("./"), net: :none, run: :none
+
+  return "Error: file not found: #{path}" unless File.exists?(path)
+  return "Error: #{path} is a directory" if File.dir?(path)
+
+  lines = File.read(path).lines
+  total = lines.size
+  s = start_line < 1 ? 1 : start_line
+  e = end_line > total ? total : end_line
+
+  out = ["File: #{path} (lines #{s}-#{e} of #{total})"]
+  i = s
+  while i <= e
+    out.push("#{i} | #{lines[i - 1]}")
+    i += 1
+  end
+  out.join("\n")
+end
+
+tool :search_files, "Search workspace files for a text substring, returning path:line: content matches." do
+  param :pattern, String,     "Text to search for (case-insensitive)"
+  param :dir,     String = ".", "Relative directory to search"
+  returns String
+  capabilities fs: read_only("./"), net: :none, run: :none
+
+  needle = pattern.downcase
+  files = Files.glob("", dir).sort
+  matches = []
+
+  files.each do |f|
+    next if matches.size >= 40
+    next if File.dir?(f)
+    begin
+      content = File.read(f)
+      next unless content.downcase.include?(needle)
+      lnum = 0
+      content.lines.each do |ln|
+        lnum += 1
+        if ln.downcase.include?(needle)
+          matches.push("#{f}:#{lnum}: #{ln.strip}")
+          break if matches.size >= 40
+        end
+      end
+    rescue RuntimeError => _e
+      # skip unreadable or binary files
+    end
+  end
+
+  matches.empty? ? "No matches for '#{pattern}'." : matches.join("\n")
+end
+
+tool :write_file, "Create or overwrite a file inside the workspace." do
+  param :path,    String, "Relative path to write"
+  param :content, String, "Full file content"
+  returns String
+  capabilities fs: read_write("./"), net: :none, run: :none
+
+  File.write(path, content)
+  nlines = content.lines.size
+  "Wrote #{path} (#{nlines} lines, #{content.size} bytes)."
+end
+
+tool :edit_file, "Replace an exact target substring in a workspace file with replacement text." do
+  param :path,        String, "Relative path to edit"
+  param :target,      String, "Exact existing text to replace"
+  param :replacement, String, "Replacement text"
+  returns String
+  capabilities fs: read_write("./"), net: :none, run: :none
+
+  return "Error: file not found: #{path}" unless File.exists?(path)
+  old_text = File.read(path)
+  return "Error: target text not found in #{path}" unless old_text.include?(target)
+
+  new_text = old_text.sub(target, replacement)
+  File.write(path, new_text)
+  "Edited #{path}:\n- #{target.gsub("\n", " ")}\n+ #{replacement.gsub("\n", " ")}"
+end
+
+tool :run_git_status, "Show short git status for the current workspace." do
+  returns String
+  capabilities fs: read_only("./"), net: :none, run: ["git"]
+
+  res = OS.run(["git", "status", "-s"])
+  out = res["output"].strip
+  out.empty? ? "(working tree clean)" : out
+end

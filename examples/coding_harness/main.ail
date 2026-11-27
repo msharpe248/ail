@@ -1,0 +1,140 @@
+# examples/coding_harness/main.ail — Antigravity / Claude Code / Codex-style TUI harness in AIL
+#
+# Run live against local Ollama:
+#   ./ail run examples/coding_harness/main.ail --env examples/coding_harness/ollama.ail.env
+# Run offline deterministic demo:
+#   ./ail run examples/coding_harness/main.ail --env examples/coding_harness/mock.ail.env
+
+require "./ui"
+require "./tools"
+require "./guards"
+
+use llm: :coder
+
+ALL_TOOLS = [list_files, read_file, search_files, write_file, edit_file, run_git_status]
+
+agent CodingAgent do
+  model        :coder
+  context_view :coder_view
+  tools        [list_files, read_file, search_files, write_file, edit_file, run_git_status]
+  guards       [WorkspaceGuard]
+  limits       max_turns: 8, tokens: 32000
+
+  system <<~PROMPT
+    You are an autonomous coding assistant working inside a sandboxed local workspace.
+    Use list_files, search_files, and read_file to inspect code before proposing or making edits.
+    Use edit_file for surgical changes and write_file for new files.
+    Be concise, accurate, and always cite exact file paths you read or modified.
+  PROMPT
+end
+
+def new_harness_context
+  c = Context.new
+  c.define_view :coder_view do |log|
+    log.drop(:tool_intermediate).limit_tokens(12000)
+  end
+  c
+end
+
+cfg = Config.get(:llm, :coder)
+model_label = cfg.fetch("model", cfg.fetch("driver", "unknown"))
+workspace = File.cwd
+
+ui_banner(model_label, workspace, HARNESS_STATE["auto_approve"])
+
+ctx = new_harness_context()
+saved_cp = nil
+running = true
+
+while running
+  ev_count = ctx.view(:audit).size
+  print "#{c_cyan("❯")} #{c_dim("[#{ev_count}]")} "
+  line = gets
+  if line == nil
+    puts ""
+    break
+  end
+
+  input = line.strip
+  next if input.empty?
+
+  if input == "/quit" || input == "/exit"
+    puts c_dim("Session ended.")
+    running = false
+  elsif input == "/help"
+    ui_help()
+  elsif input == "/tools"
+    puts ""
+    puts c_bold("Registered Tools (VM-sandboxed via cap.restrict):")
+    ALL_TOOLS.each do |t|
+      puts "  #{c_yellow(t.name)}  #{c_dim(t.doc)}"
+    end
+    puts ""
+  elsif input.start_with?("/files")
+    parts = input.split
+    dir = parts.size > 1 ? parts[1] : "."
+    puts list_files(dir, "")
+  elsif input == "/history"
+    events = ctx.view(:audit).to_a
+    puts ""
+    puts c_dim("--- Audit Log (#{events.size} events) ---")
+    events.each do |ev|
+      kind = ev["kind"]
+      puts "  #{c_magenta("[#{kind}]")} #{ui_truncate(ev["payload"].to_s, 100)}"
+    end
+    puts ""
+  elsif input == "/checkpoint"
+    saved_cp = ctx.checkpoint
+    puts c_yellow("Saved checkpoint at event ##{saved_cp}.")
+  elsif input == "/rewind"
+    if saved_cp == nil
+      puts c_yellow("No checkpoint saved yet. Use /checkpoint first.")
+    else
+      ctx.rewind(saved_cp)
+      puts c_yellow("Rewound session to event ##{saved_cp}.")
+    end
+  elsif input == "/approve"
+    HARNESS_STATE["auto_approve"] = !HARNESS_STATE["auto_approve"]
+    mode = HARNESS_STATE["auto_approve"] ? c_yellow("auto-approve ON") : c_green("ask-on-write ON")
+    puts "Approval mode: #{mode}"
+  elsif input == "/clear"
+    ctx = new_harness_context()
+    saved_cp = nil
+    puts c_yellow("Cleared session context.")
+  else
+    puts ui_rule()
+    started_reply = false
+    begin
+      CodingAgent.stream(input,
+        context: ctx,
+        on_tool_call: ->(tname, targs) {
+          if started_reply
+            puts ""
+            started_reply = false
+          end
+          ui_tool_start(tname, targs)
+        },
+        on_tool_result: ->(tname, res, ok) {
+          ui_tool_done(tname, res, ok)
+        }
+      ) do |tok|
+        unless started_reply
+          print "\n#{c_green("◆")} "
+          started_reply = true
+        end
+        print tok
+      end
+      puts "" if started_reply
+      puts ui_rule()
+    rescue GuardViolation => e
+      puts c_red("  ✗ Guard blocked request: #{e.message}")
+      puts ui_rule()
+    rescue BudgetExceeded => e
+      puts c_red("  ✗ Budget exceeded: #{e.message}")
+      puts ui_rule()
+    rescue LLMError => e
+      puts c_red("  ✗ LLM error: #{e.message}")
+      puts ui_rule()
+    end
+  end
+end

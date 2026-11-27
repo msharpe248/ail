@@ -1,0 +1,49 @@
+# examples/coding_harness/guards.ail — Workspace safety & interactive approval guardrails
+
+# Shared mutable toggle controllable via `/approve` or `AIL_AUTO_APPROVE=1`
+HARNESS_STATE = {
+  auto_approve: Env.get("AIL_AUTO_APPROVE", "") == "1"
+}
+
+def unsafe_path?(p)
+  return false if p == nil
+  s = p.to_s.strip
+  return true if s.start_with?("/")
+  return true if s.include?("..")
+  false
+end
+
+guard WorkspaceGuard do
+  check_tool do |call, ctx|
+    tname = call["name"]
+    targs = call["arguments"]
+
+    # 1. Always reject path traversal or absolute paths outside the workspace
+    if targs != nil
+      if unsafe_path?(targs["path"]) || unsafe_path?(targs["dir"])
+        return reject("Path must stay inside workspace (no leading '/' or '..')")
+      end
+    end
+
+    # 2. Interactive human-in-the-loop approval before mutating files
+    if (tname == "write_file" || tname == "edit_file") && !HARNESS_STATE["auto_approve"]
+      target_path = targs != nil ? targs.fetch("path", "?") : "?"
+      print "  \e[1;33m? Approve #{tname} on \"#{target_path}\"? [y/N]\e[0m "
+      ans = gets
+      if ans == nil || (ans.strip.downcase != "y" && ans.strip.downcase != "yes")
+        return reject("Denied by user")
+      end
+    end
+
+    allow
+  end
+
+  check_output do |msg, ctx|
+    cleaned = msg.gsub(/\bsk-[A-Za-z0-9_-]{16,}\b/, "[REDACTED-API-KEY]")
+    cleaned = cleaned.gsub(/\b\d{3}-\d{2}-\d{4}\b/, "[REDACTED-SSN]")
+    if cleaned != msg
+      return redact(cleaned)
+    end
+    allow
+  end
+end

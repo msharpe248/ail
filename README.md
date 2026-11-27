@@ -62,7 +62,11 @@ make
 # Run a live A2A agent HTTP server (Agent Card + JSON-RPC 2.0 + graceful SIGTERM)
 ./ail run examples/a2a_support.ail --env examples/flow_rag.ail.env -- --http 127.0.0.1:9000
 
-# Run live against local Ollama (e.g. gemma4:31b-mlx)
+# Run live interactive chatbot & coding agent TUI harness against local Ollama
+./ail run examples/chatbot/main.ail --env examples/chatbot/ollama.ail.env
+./ail run examples/coding_harness/main.ail --env examples/coding_harness/ollama.ail.env
+
+# Run live streaming & multi-file Support Desk against local Ollama
 ./ail run examples/stream_ollama.ail --env examples/ollama_v03.ail.env
 ./ail run examples/support_desk/main.ail --env examples/support_desk/ollama.ail.env
 
