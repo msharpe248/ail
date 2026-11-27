@@ -7,20 +7,22 @@ require "./schemas"
 require "./guards"
 require "./tools"
 
-use s1:        :router
-use llm:       :agent_model
-use embedder:  :docs
-use vector_db: :kb
+expect config do
+  $s1[:router]
+  $llm[:agent_model], capabilities: [:tools]
+  $embedder[:docs]
+  $vector_db[:kb]
+end
 
 # 1. Seed the Knowledge base for RAG retrieval
-kb = Knowledge.new(vector_db: :kb)
+kb = Knowledge.new(vector_db: $vector_db[:kb])
 kb.ingest("kb_refund",  "Duplicate invoice charges are refunded within 3 business days", { topic: "billing" })
 kb.ingest("kb_reset",   "Password reset links expire after 15 minutes",                  { topic: "account" })
 kb.ingest("kb_timeout", "Increase timeout_ms in .ail.env for slow local model endpoints",{ topic: "technical" })
 
 # 2. Define the support desk agent backed by our sandboxed tool & PII guard
 agent DeskAgent do
-  model  :agent_model
+  model  $llm[:agent_model]
   tools  [lookup_policy]
   guards [PIIGuard]
   limits max_turns: 5, tokens: 4000
@@ -71,7 +73,7 @@ flow SupportDeskFlow
   start :intake
   node  :intake --> :classify
 
-  decide :classify, using: :router do
+  decide :classify, using: $s1[:router] do
     choice :queue, [:billing, :technical, :account]
     score  :urgency, 1..5
   end

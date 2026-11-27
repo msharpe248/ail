@@ -5,7 +5,15 @@
 # Run offline with mock driver:
 #   ./ail run examples/chatbot/main.ail --env examples/chatbot/mock.ail.env
 
-use llm: :chat
+expect config do
+  $llm[:chat]
+errors |errs|
+  errs.each do |e|
+    eputs "\e[31mMissing config #{e.key}:\e[0m #{e.reason}"
+  end
+  eputs "Run with: ./ail run examples/chatbot/main.ail --env examples/chatbot/ollama.ail.env"
+  OS.exit(1)
+end
 
 # Optional safety guardrail: redacts SSNs before showing output
 guard ChatGuard do
@@ -18,7 +26,7 @@ guard ChatGuard do
 end
 
 agent ChatBot do
-  model        :chat
+  model        $llm[:chat]
   context_view :window
   guards       [ChatGuard]
   limits       max_turns: 2
@@ -38,8 +46,7 @@ def new_chat_context
   c
 end
 
-cfg = Config.get(:llm, :chat)
-model_label = cfg.fetch("model", cfg.fetch("driver", "unknown"))
+model_label = $llm[:chat].fetch("model", $llm[:chat].fetch("driver", "unknown"))
 
 puts "\e[1;36mAIL Chat\e[0m \e[2m(#{model_label})\e[0m"
 puts "\e[2mType a message, or /help, /history, /checkpoint, /rewind, /reset, /quit\e[0m"

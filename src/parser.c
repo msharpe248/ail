@@ -208,7 +208,7 @@ static bool can_start_arg(const Parser *p) {
     switch (k) {
         case TOK_INT: case TOK_FLOAT: case TOK_DECIMAL:
         case TOK_STRING: case TOK_STR_HEAD: case TOK_SYMBOL: case TOK_REGEX:
-        case TOK_IDENT: case TOK_LABEL: case TOK_IVAR: case TOK_SELF:
+        case TOK_IDENT: case TOK_LABEL: case TOK_IVAR: case TOK_GVAR: case TOK_SELF:
         case TOK_NIL: case TOK_TRUE: case TOK_FALSE:
         case TOK_LPAREN: case TOK_LBRACK: case TOK_LBRACE:
         case TOK_ARROW: case TOK_BANG: case TOK_MINUS: case TOK_NOT:
@@ -534,6 +534,12 @@ static Node *parse_primary(Parser *p) {
         case TOK_IVAR: {
             bump(p);
             Node *n = node_new(p->arena, ND_IVAR, sp);
+            n->u.ident.name = t->text;
+            return n;
+        }
+        case TOK_GVAR: {
+            bump(p);
+            Node *n = node_new(p->arena, ND_GVAR, sp);
             n->u.ident.name = t->text;
             return n;
         }
@@ -1322,6 +1328,54 @@ static Node *parse_a2a_agent(Parser *p) {
 
 /* ---- Statements ---- */
 
+static Node *parse_expect_config(Parser *p) {
+    Span sp = bump(p)->span; /* expect */
+    if (!at_ident(p, "config")) {
+        diag_error(p->diags, cur(p)->span, "expected 'config' after 'expect'");
+    } else {
+        bump(p);
+    }
+    eat(p, TOK_DO);
+    skip_seps(p);
+
+    Node *n = node_new(p->arena, ND_EXPECT_CONFIG, sp);
+    ExpectEntry entries[128];
+    size_t elen = 0;
+
+    while (!at(p, TOK_END) && !at_ident(p, "errors") && !at(p, TOK_EOF)) {
+        Span esp = cur(p)->span;
+        ExpectEntry ent = { .span = esp };
+        ent.resource = parse_expr(p);
+        if (eat(p, TOK_COMMA)) {
+            parse_kv_args(p, &ent.opts);
+        } else if (eat(p, TOK_FAT_ARROW)) {
+            ent.opts_expr = parse_expr(p);
+        }
+        if (elen < 128) entries[elen++] = ent;
+        skip_seps(p);
+    }
+
+    if (elen > 0) {
+        n->u.expect_nd.entries = (ExpectEntry *)arena_alloc(p->arena, elen * sizeof(ExpectEntry));
+        memcpy(n->u.expect_nd.entries, entries, elen * sizeof(ExpectEntry));
+        n->u.expect_nd.entry_len = elen;
+    }
+
+    if (at_ident(p, "errors")) {
+        bump(p);
+        n->u.expect_nd.has_errors_handler = true;
+        eat(p, TOK_DO);
+        if (eat(p, TOK_PIPE)) {
+            n->u.expect_nd.err_var = expect_name_or_sym(p, "errors variable name");
+            expect(p, TOK_PIPE, "'|'");
+        }
+        parse_body_until(p, &n->u.expect_nd.errors_body, TOK_END, TOK_EOF, TOK_EOF, TOK_EOF);
+    }
+
+    expect(p, TOK_END, "'end'");
+    return n;
+}
+
 static Node *parse_stmt(Parser *p) {
     Span sp = cur(p)->span;
     Node *st = NULL;
@@ -1342,6 +1396,7 @@ static Node *parse_stmt(Parser *p) {
             return st;
         }
         case TOK_USE:        return parse_use_decl(p);
+        case TOK_EXPECT:     return parse_expect_config(p);
         case TOK_SCHEMA:     return parse_schema_decl(p);
         case TOK_TOOL:       return parse_tool_decl(p);
         case TOK_GUARD:      return parse_guard_decl(p);

@@ -20,6 +20,7 @@ typedef enum {
     TOK_IDENT,       /* name, name?, name! */
     TOK_LABEL,       /* name: (keyword arg / hash key) */
     TOK_IVAR,        /* @name */
+    TOK_GVAR,        /* $name (typed resource registry: $llm, $db, $mcp, ...) */
 
     /* Core Ruby keywords */
     TOK_DEF,
@@ -57,6 +58,7 @@ typedef enum {
     /* Top-level / statement-leading AIL keywords */
     TOK_REQUIRE,
     TOK_USE,
+    TOK_EXPECT,
     TOK_SCHEMA,
     TOK_TOOL,
     TOK_GUARD,

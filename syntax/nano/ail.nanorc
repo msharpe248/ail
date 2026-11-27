@@ -6,13 +6,13 @@ syntax ail "\.ail$"
 comment "#"
 
 # Core keywords
-color brightmagenta "\<(def|end|class|module|include|use|require|require_relative|if|elsif|else|unless|case|when|while|until|for|in|do|begin|rescue|ensure|raise|return|break|next|yield|and|or|not)\>"
+color brightmagenta "\<(def|end|class|module|include|expect|require|require_relative|if|elsif|else|unless|case|when|while|until|for|in|do|begin|rescue|ensure|raise|return|break|next|yield|and|or|not)\>"
 
 # First-class AI keywords
 color brightcyan "\<(schema|tool|guard|skill|decide|agent|flow|within|retry_up_to|mcp_server|a2a_agent)\>"
 
 # AI DSL directives
-color cyan "\<(field|param|returns|capabilities|limits|model|system|tools|mcp|skills|guards|context_view|check_input|check_output|check_tool|instructions|choice|score|prob|start|node|edge|expose|resource|prompt|handle)\>"
+color cyan "\<(config|errors|field|param|returns|capabilities|limits|model|system|tools|mcp|skills|guards|context_view|check_input|check_output|check_tool|instructions|choice|score|prob|start|node|edge|expose|resource|prompt|handle)\>"
 
 # Builtins
 color yellow "\<(puts|print|eputs|gets|sleep_ms|budget|read_only|read_write|allow|reject|redact|escalate)\>"
@@ -24,6 +24,7 @@ color green "\<(Int|Float|Decimal|Bool|String|Array|Hash|Range|Regex|Symbol|Dura
 color brightyellow "\<(true|false|nil|self)\>"
 color magenta ":[a-zA-Z_][a-zA-Z0-9_]*[?!]?"
 color brightblue "@[a-zA-Z_][a-zA-Z0-9_]*"
+color brightcyan "\$(llm|s1|embedder|db|vector_db|mcp|skills)\>"
 
 # Numbers, decimals & durations
 color brightred "\<[0-9][0-9_]*(\.[0-9_]+)?(\.(ms|s|m|h)|d)?\>"

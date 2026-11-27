@@ -8,7 +8,7 @@ AIL is written in **plain C11 with zero external compiler dependencies** and com
 
 ## Why AIL?
 
-- **Code never hardcodes providers or databases:** Source files declare logical names (`use llm: :fast`, `use s1: :router`, `use vector_db: :kb`, `use mcp: :repo_tools`) mapped at runtime via `.ail.env` / `.mlws.env` — swap between offline mocks, local Ollama/vLLM, and cloud APIs without editing a line of code.
+- **Code never hardcodes providers or databases:** Source files reference typed global resource registries (`$llm[:fast]`, `$s1[:router]`, `$vector_db[:kb]`, `$mcp[:repo_tools]`, `$db[:sessions]`) mapped 1-to-1 to `.ail.env` / `.mlws.env` — with `expect config do ... errors |errs| ... end` for startup contracts and graceful fallbacks. Swap between offline mocks, local Ollama/vLLM, and cloud APIs without editing a line of code.
 - **VM-enforced safety, not prompt suggestions:** `tool` capabilities run inside MLWSVM `cap.restrict` sandboxes, `within budget(...)` enforces monotonic wall-clock deadlines via MLWSVM `quota 6`, and `flow` graphs reject unbounded cycles at compile time.
 - **Ruby-like ergonomics:** Clean `def`/`class`/block/closure syntax, internal iterators, exact decimals (`0.25d`), durations (`30.s`), multi-file `require`, an interactive REPL (`ail repl`), and source-mapped debugging (`ail debug`).
 

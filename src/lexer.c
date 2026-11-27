@@ -62,7 +62,7 @@ static bool can_start_regex(TokKind prev) {
     switch (prev) {
         case TOK_INT: case TOK_FLOAT: case TOK_DECIMAL:
         case TOK_STRING: case TOK_STR_TAIL: case TOK_SYMBOL: case TOK_REGEX:
-        case TOK_IDENT: case TOK_IVAR: case TOK_SELF: case TOK_NIL:
+        case TOK_IDENT: case TOK_IVAR: case TOK_GVAR: case TOK_SELF: case TOK_NIL:
         case TOK_TRUE: case TOK_FALSE: case TOK_RPAREN: case TOK_RBRACK: case TOK_RBRACE:
             return false;
         default:
@@ -81,7 +81,7 @@ static TokKind lookup_keyword(const char *s, size_t n) {
         {"next", TOK_NEXT}, {"yield", TOK_YIELD}, {"self", TOK_SELF},
         {"nil", TOK_NIL}, {"true", TOK_TRUE}, {"false", TOK_FALSE},
         {"and", TOK_AND}, {"or", TOK_OR}, {"not", TOK_NOT},
-        {"use", TOK_USE}, {"require", TOK_REQUIRE}, {"require_relative", TOK_REQUIRE},
+        {"use", TOK_USE}, {"expect", TOK_EXPECT}, {"require", TOK_REQUIRE}, {"require_relative", TOK_REQUIRE},
         {"schema", TOK_SCHEMA}, {"tool", TOK_TOOL},
         {"guard", TOK_GUARD}, {"skill", TOK_SKILL}, {"decide", TOK_DECIDE},
         {"agent", TOK_AGENT}, {"flow", TOK_FLOW}, {"within", TOK_WITHIN},
@@ -508,6 +508,20 @@ void lex_source(const char *file, const char *src, size_t len,
             continue;
         }
 
+        /* Resource registry / global $name (e.g. $llm, $s1, $db, $mcp) */
+        if (c == '$' && is_ident_start(peek(&lx, 1))) {
+            advance(&lx);
+            size_t start = lx.pos;
+            while (is_ident_cont(peek(&lx, 0))) advance(&lx);
+            Token t = {0};
+            t.kind = TOK_GVAR;
+            t.span = sp;
+            t.text = arena_strndup(lx.arena, lx.src + start, lx.pos - start);
+            t.len = lx.pos - start;
+            push_tok(&lx, t);
+            continue;
+        }
+
         /* Symbols :name */
         if (c == ':' && is_ident_start(peek(&lx, 1))) {
             advance(&lx);
@@ -651,6 +665,7 @@ const char *tok_kind_name(TokKind k) {
         case TOK_IDENT: return "identifier";
         case TOK_LABEL: return "keyword label";
         case TOK_IVAR: return "instance variable";
+        case TOK_GVAR: return "resource registry";
         case TOK_DEF: return "'def'";
         case TOK_END: return "'end'";
         case TOK_CLASS: return "'class'";
@@ -674,6 +689,7 @@ const char *tok_kind_name(TokKind k) {
         case TOK_NEXT: return "'next'";
         case TOK_YIELD: return "'yield'";
         case TOK_USE: return "'use'";
+        case TOK_EXPECT: return "'expect'";
         case TOK_REQUIRE: return "'require'";
         case TOK_SCHEMA: return "'schema'";
         case TOK_TOOL: return "'tool'";

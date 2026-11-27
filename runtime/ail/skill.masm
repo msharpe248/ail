@@ -173,6 +173,7 @@ ls_loop:
     inc I2
     bz.r R3, ls_loop
     bisa R3, AilSkill, add_inline
+    bisa R3, core.AilResource, load_res_cfg
     bisa R3, core.AilSym, load_cfg
     typeof I3, R3
     beq I3, 1, load_dir
@@ -183,8 +184,12 @@ add_inline:
 load_dir:
     call scan_dir (R3, R1)
     jmp ls_loop
+load_res_cfg:
+    mov R4, R3->core.AilResource.name
+    jmp load_cfg_go
 load_cfg:
     mov R4, R3->core.AilSym.name
+load_cfg_go:
     call cfg.get_binding_raw ("skills", R4) -> (R5)
     bz.r R5, ls_loop
     mget.r R6, R5, "paths", null

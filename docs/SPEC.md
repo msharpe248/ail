@@ -20,14 +20,26 @@ All external inference, storage, MCP, and skill resources are referenced by **ki
 | `mcp` | External MCP server connection | `stdio`, `http` (Streamable HTTP) |
 | `skills` | Agent Skills catalog (`SKILL.md` folders) | `dir` |
 
-Top-level preflight declarations:
+Typed global resource registries (`$llm`, `$s1`, `$embedder`, `$db`, `$vector_db`, `$mcp`, `$skills`) map 1-to-1 to `.ail.env` keys (`$llm[:fast]` ↔ `llm.fast`). Use `expect config do ... errors |errs| ... end` for startup validation and graceful fallbacks:
+
 ```ruby
-use llm: :reasoning, capabilities: [:tools, :structured]
-use s1: :router
-use db: :sessions
-use vector_db: :kb
-use mcp: :github
-use skills: :workspace
+expect config do
+  $llm[:reasoning], capabilities: [:tools, :structured]
+  $s1[:router]
+  $db[:sessions]
+  $vector_db[:kb]
+  $mcp[:github]
+  $skills[:workspace]
+errors |errs|
+  errs.each do |e|
+    if e.kind == :db
+      $db[:sessions] = { driver: "memory" }   # runtime fallback via env.set
+    else
+      eputs "Config error for #{e.key}: #{e.reason}"
+      OS.exit(1)
+    end
+  end
+end
 ```
 
 ---

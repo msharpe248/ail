@@ -22,7 +22,7 @@
     ["'", "'"]
   ],
   "indentationRules": {
-    "increaseIndentPattern": "^\\s*((def|class|module|schema|tool|guard|skill|decide|agent|flow|within|retry_up_to|mcp_server|a2a_agent|if|elsif|else|unless|case|when|while|until|begin|rescue|ensure)\\b.*|\\S.*\\bdo\\b(\\s*\\|[^|]*\\|)?\\s*(#.*)?)$",
-    "decreaseIndentPattern": "^\\s*(end|elsif|else|when|rescue|ensure)\\b"
+    "increaseIndentPattern": "^\\s*((def|class|module|expect|schema|tool|guard|skill|decide|agent|flow|within|retry_up_to|mcp_server|a2a_agent|if|elsif|else|unless|case|when|while|until|begin|rescue|ensure|errors)\\b.*|\\S.*\\bdo\\b(\\s*\\|[^|]*\\|)?\\s*(#.*)?)$",
+    "decreaseIndentPattern": "^\\s*(end|elsif|else|when|rescue|ensure|errors)\\b"
   }
 }

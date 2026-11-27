@@ -406,6 +406,12 @@ static void emit_expr(Codegen *cg, Node *n) {
             sb_append(cg->cur, ") -> (R3)\n");
             break;
 
+        case ND_GVAR:
+            sb_append(cg->cur, "    mov R4, ");
+            sb_append_escaped(cg->cur, n->u.ident.name, strlen(n->u.ident.name));
+            sb_append(cg->cur, "\n    call core.mk_res_reg (R4) -> (R3)\n");
+            break;
+
         case ND_IDENT: {
             /* Exception / builtin constant names or env lookup with fallback to zero-arg call */
             int l_found = next_lbl(cg);
@@ -869,9 +875,43 @@ static void emit_expr(Codegen *cg, Node *n) {
 
         case ND_REQUIRE:
         case ND_USE:
-            /* Handled during compile-time loading / preflight */
+            /* Legacy no-op; prefer $kind[:name] and `expect config do ... end` */
             sb_append(cg->cur, "    mov R3, null\n");
             break;
+
+        case ND_EXPECT_CONFIG: {
+            int l_ok = next_lbl(cg);
+            sb_append(cg->cur, "    lnew R3\n    push R3\n");
+            for (size_t i = 0; i < n->u.expect_nd.entry_len; i++) {
+                const ExpectEntry *ent = &n->u.expect_nd.entries[i];
+                emit_expr(cg, ent->resource);
+                sb_append(cg->cur, "    push R3\n");
+                if (ent->opts_expr) {
+                    emit_expr(cg, ent->opts_expr);
+                } else if (ent->opts.len > 0) {
+                    emit_kv_map(cg, &ent->opts);
+                } else {
+                    sb_append(cg->cur, "    mov R3, null\n");
+                }
+                sb_append(cg->cur, "    mov R5, R3\n    pop R4\n    mov R6, SP[0]\n");
+                sb_append(cg->cur, "    call core.check_expect_entry (R4, R5, R6)\n");
+            }
+            sb_append(cg->cur, "    pop R4\n    len I0, R4\n");
+            sb_printf(cg->cur, "    bz I0, .L%d\n", l_ok);
+            if (n->u.expect_nd.has_errors_handler) {
+                if (n->u.expect_nd.err_var) {
+                    sb_append(cg->cur, "    mov R5, LOC[0]\n");
+                    sb_append(cg->cur, "    call core.env_set (R5, ");
+                    sb_append_escaped(cg->cur, n->u.expect_nd.err_var, strlen(n->u.expect_nd.err_var));
+                    sb_append(cg->cur, ", R4)\n");
+                }
+                emit_stmts(cg, &n->u.expect_nd.errors_body);
+            } else {
+                sb_append(cg->cur, "    call core.raise_expect_errors (R4)\n");
+            }
+            sb_printf(cg->cur, ".L%d:\n    mov R3, null\n", l_ok);
+            break;
+        }
 
         case ND_SCHEMA: {
             sb_append(cg->cur, "    lnew R3\n");

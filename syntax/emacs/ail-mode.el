@@ -25,7 +25,7 @@
   (list
    ;; Core & AI declaration keywords
    (cons (regexp-opt
-          '("def" "end" "class" "module" "include" "use" "require" "require_relative"
+          '("def" "end" "class" "module" "include" "expect" "require" "require_relative"
             "if" "elsif" "else" "unless" "case" "when" "while" "until" "for" "in" "do"
             "begin" "rescue" "ensure" "raise" "return" "break" "next" "yield"
             "and" "or" "not"
@@ -35,7 +35,7 @@
          'font-lock-keyword-face)
    ;; AI DSL directives
    (cons (regexp-opt
-          '("field" "param" "returns" "capabilities" "limits"
+          '("config" "errors" "field" "param" "returns" "capabilities" "limits"
             "model" "system" "tools" "mcp" "skills" "guards" "context_view"
             "check_input" "check_output" "check_tool"
             "instructions" "choice" "score" "prob"
@@ -68,8 +68,9 @@
    '("\\<def\\s-+\\([a-zA-Z_][a-zA-Z0-9_]*[?!]?\\)" 1 font-lock-function-name-face)
    '("\\<\\(?:class\\|module\\|schema\\|guard\\|agent\\|flow\\)\\s-+\\([A-Z][a-zA-Z0-9_]*\\)"
      1 font-lock-type-face)
-   ;; Symbols, keyword labels, ivars, flow arrow
+   ;; Symbols, keyword labels, ivars, typed resource registries, flow arrow
    '("@[a-zA-Z_][a-zA-Z0-9_]*" . font-lock-variable-name-face)
+   '("\\$\\(?:llm\\|s1\\|embedder\\|db\\|vector_db\\|mcp\\|skills\\)\\>" . font-lock-builtin-face)
    '("\\(?:^\\|[^:a-zA-Z0-9_]\\)\\(:[a-zA-Z_][a-zA-Z0-9_]*[?!]?\\)" 1 font-lock-constant-face)
    '("\\<[a-zA-Z_][a-zA-Z0-9_]*[?!]?:" . font-lock-constant-face)
    '("-->" . font-lock-keyword-face))

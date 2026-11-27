@@ -102,6 +102,7 @@ echo "=== 3. AI constructs runtime (examples/ai_features.ail) ==="
 OUT=$($AIL run examples/ai_features.ail --env examples/app.ail.env)
 EXPECTED=$(cat <<'EOF'
 cfg_model=qwen3:8b
+expect_fallback=true:memory
 ticket=42:Fix parser:p3
 schema_has_title=true
 validation=schema_err
@@ -126,6 +127,13 @@ else
     echo "Got:"
     echo "$OUT"
     fail "examples/ai_features.ail output mismatch"
+fi
+
+# Verify `expect config ... errors |errs|` handles missing .ail.env gracefully with exit 1
+if $AIL run examples/chatbot/main.ail >/dev/null 2>&1; then
+    fail "chatbot without --env should have exited non-zero via expect config"
+else
+    pass "expect config errors handler exits cleanly on missing binding"
 fi
 
 echo "=== 4. Live MCP server (--stdio) ==="

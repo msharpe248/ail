@@ -19,7 +19,7 @@ syn keyword ailControl      if elsif else unless case when while until for in do
 syn keyword ailControl      return break next yield
 syn keyword ailException    begin rescue ensure raise
 syn keyword ailDefine       def class module include
-syn keyword ailImport       use require require_relative
+syn keyword ailImport       expect require require_relative
 syn keyword ailOperatorWord and or not
 syn keyword ailBoolean      true false
 syn keyword ailNil          nil
@@ -30,7 +30,7 @@ syn keyword ailAIKeyword    schema tool guard skill decide agent flow
 syn keyword ailAIKeyword    within retry_up_to mcp_server a2a_agent
 
 " AI DSL directives (contextual keywords inside blocks)
-syn keyword ailAIDirective  field param returns capabilities limits
+syn keyword ailAIDirective  config errors field param returns capabilities limits
 syn keyword ailAIDirective  model system tools mcp skills guards context_view
 syn keyword ailAIDirective  check_input check_output check_tool
 syn keyword ailAIDirective  instructions choice score prob
@@ -54,8 +54,9 @@ syn keyword ailExceptionCls EmbedderError VectorError FlowError
 syn match   ailFunctionName "\<\(def\)\s\+\zs[a-zA-Z_][a-zA-Z0-9_]*[?!]\?"
 syn match   ailTypeName     "\<\(class\|module\|schema\|guard\|agent\|flow\)\s\+\zs[A-Z][a-zA-Z0-9_]*"
 
-" Instance variables
+" Instance variables & typed resource registries ($llm, $s1, $db, $mcp, ...)
 syn match   ailIvar         "@[a-zA-Z_][a-zA-Z0-9_]*"
+syn match   ailResReg       "\$\(llm\|s1\|embedder\|db\|vector_db\|mcp\|skills\)\>"
 
 " Keyword argument / hash labels (foo:) and symbols (:foo, :foo?)
 syn match   ailLabel        "\<[a-zA-Z_][a-zA-Z0-9_]*[?!]\?:\ze[^:]"
@@ -108,6 +109,7 @@ hi def link ailFunctionName  Function
 hi def link ailTypeName      Type
 
 hi def link ailIvar          Identifier
+hi def link ailResReg        Special
 hi def link ailLabel         Constant
 hi def link ailSymbol        Constant
 

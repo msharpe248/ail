@@ -106,9 +106,19 @@ end
 
 ---
 
-## 3. Unified Configuration Bindings (`.ail.env`)
+## 3. Typed Resource Registries (`$llm`, `$db`, ...) & `expect config`
 
-AIL code **never** hardcodes whether an LLM is local (Ollama, vLLM, `llama.cpp`) or remote (OpenAI, Anthropic), nor whether a database is in-memory, JSONL, or external. Instead, source code refers to **logical names** (`:reasoning`, `:router`, `:sessions`, `:kb`, `:repo_tools`), and a runtime `.ail.env` file (MLWSVM's native `.mlws.env` format) maps each `<kind>.<name>` to a JSON config object:
+AIL code **never** hardcodes whether an LLM is local (Ollama, vLLM, `llama.cpp`) or remote (OpenAI, Anthropic), nor whether a database is in-memory, JSONL, or external. Instead, AIL provides seven built-in **typed resource registries** that map 1-to-1 to keys in your runtime `.ail.env` file:
+
+| AIL Resource Reference | `.ail.env` Key | Role |
+|---|---|---|
+| `$llm[:fast]` | `llm.fast` | Generative System 2 model |
+| `$s1[:router]` | `s1.router` | Discriminative System 1 classifier |
+| `$embedder[:docs]` | `embedder.docs` | Text → embedding vector |
+| `$db[:sessions]` | `db.sessions` | Context / session persistence DB |
+| `$vector_db[:kb]` | `vector_db.kb` | Vector index (`Knowledge` RAG) |
+| `$mcp[:repo_tools]` | `mcp.repo_tools` | External MCP server |
+| `$skills[:local]` | `skills.local` | Agent Skills (`SKILL.md`) catalog |
 
 ```properties
 # Local Ollama — source code doesn't know it's local
@@ -128,16 +138,31 @@ mcp.repo_tools = {"transport": "stdio", "cmd": ["./ail", "run", "examples/mcp_re
 skills.local   = {"driver": "dir", "paths": ["./examples/skills"]}
 ```
 
-Declare expected bindings at the top of a file with `use`:
+### Validating Config & Graceful Fallbacks (`expect config`)
+Use `expect config do ... end` at startup to verify required bindings (and optional `capabilities:` or `driver:` constraints) all at once. If you include an `errors |errs|` block, you can inspect each failure (`e.kind`, `e.name`, `e.key`, `e.reason`) and either register a runtime default directly into the VM environment (`$db[:sessions] = { ... }`) or exit cleanly:
 
 ```ruby
-use llm: :fast
-use s1: :router
-use db: :sessions
-use vector_db: :kb
-use mcp: :repo_tools
-use skills: :local
+expect config do
+  $llm[:fast], capabilities: [:tools, :structured]
+  $s1[:router]
+  $db[:sessions]
+errors |errs|
+  errs.each do |e|
+    if e.kind == :db
+      $db[:sessions] = { driver: "memory" }   # graceful in-memory fallback
+    else
+      eputs "Config error for #{e.key}: #{e.reason}"
+      OS.exit(1)
+    end
+  end
+end
+
+# Inspect configured fields directly:
+puts $llm[:fast]["model"]
+puts $db[:sessions].exists?
 ```
+
+Without an `errors` clause, `expect config` raises `ConfigError` listing every missing or incompatible binding.
 
 Run with `--env`:
 ```sh
@@ -216,7 +241,7 @@ Guard hooks can run arbitrary Ruby logic, linear-time regexes, or even a fast Sy
 `Context` is an **append-only event log**—events are never destructively stripped. Instead, you project named **views** over the underlying log while `:audit` always preserves the full lossless history:
 
 ```ruby
-ctx = Context.new(db: :sessions)
+ctx = Context.new(db: $db[:sessions])
 ctx.append(:user, "Investigate the crash")
 snap = ctx.checkpoint
 ctx.append(:tool_intermediate, "noisy grep output...")
@@ -225,7 +250,7 @@ ctx.append(:assistant, "Found root cause in parser.c")
 ctx.define_view :llm_compact do |log|
   log
     .drop(:tool_intermediate)
-    .compact_before(-6, using: :fast)
+    .compact_before(-6, using: $llm[:fast])
     .limit_tokens(8000)
 end
 
@@ -260,11 +285,11 @@ An `agent` wires together a logical `model`, `system` prompt, local `tools`, ext
 
 ```ruby
 agent LocalAssistant do
-  model        :local
+  model        $llm[:local]
   context_view :llm_compact
   tools        [multiply]
-  mcp          [{ repo_tools: { only: [:word_count] } }]
-  skills       [:local]
+  mcp          [{ $mcp[:repo_tools] => { only: [:word_count] } }]
+  skills       [$skills[:local]]
   guards       [NoPII]
   limits       max_turns: 6, tokens: 20_000, retries: 1
 
@@ -314,10 +339,10 @@ Run it directly or ship it as a single binary:
 ```
 
 ### Connecting to MCP Servers
-Agents attach external MCP servers by logical name (`mcp [:repo_tools]`, or filtered `[{ repo_tools: { only: [:word_count] } }]`). You can also invoke an MCP server directly from code:
+Agents attach external MCP servers via `$mcp[:name]` (`mcp [$mcp[:repo_tools]]`, or filtered `[{ $mcp[:repo_tools] => { only: [:word_count] } }]`). You can also invoke an MCP server directly from code:
 
 ```ruby
-cl = MCP.connect(:repo_tools)
+cl = MCP.connect($mcp[:repo_tools])
 puts cl.call_tool(:word_count, { text: "hello from ail" })
 puts cl.read_resource("repo://readme")
 cl.close
@@ -347,7 +372,7 @@ At startup, only each skill's lightweight `name` and `description` are added to 
 `decide` provides fast, schema-constrained discriminative inference (Jev-style `choice`, `score`, `prob`) returning typed values with calibrated `.confidence`:
 
 ```ruby
-d = decide using: :router, on: ticket_text do
+d = decide using: $s1[:router], on: ticket_text do
   choice :queue, [:billing, :tech, :fraud]
   score  :urgency, 1..5
   prob   :duplicate?
@@ -377,7 +402,7 @@ flow SupportFlow
   start :intake
   node :intake --> :triage
 
-  decide :triage, using: :router do
+  decide :triage, using: $s1[:router] do
     choice :queue, [:billing, :tech, :fraud]
     score  :urgency, 1..5
   end
@@ -401,7 +426,7 @@ end
 `Knowledge` binds to a named `vector_db` and `embedder`, storing vectors in a single flat `N × dim` `f32` matrix accelerated by MLWSVM 0.30.0's `vec.normalize_into` and `vec.top_k` batch natives:
 
 ```ruby
-kb = Knowledge.new(vector_db: :kb)
+kb = Knowledge.new(vector_db: $vector_db[:kb])
 kb.ingest("doc1", "MLWSVM register machine written in C11", { lang: "c" })
 kb.ingest("doc2", "AIL Ruby syntax agents and MCP servers", { lang: "ail" })
 

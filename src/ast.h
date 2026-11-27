@@ -125,6 +125,13 @@ typedef struct {
     Span span;
 } WhenClause;
 
+typedef struct {
+    Node *resource;
+    KvList opts;
+    Node *opts_expr;
+    Span span;
+} ExpectEntry;
+
 /* ---- Unified AST Node ---- */
 
 typedef enum {
@@ -148,6 +155,7 @@ typedef enum {
     /* Variables & ops */
     ND_IDENT,
     ND_IVAR,
+    ND_GVAR,
     ND_SELF,
     ND_CONST_PATH,
     ND_ASSIGN,
@@ -181,6 +189,7 @@ typedef enum {
     /* First-class AIL constructs */
     ND_REQUIRE,
     ND_USE,
+    ND_EXPECT_CONFIG,
     ND_SCHEMA,
     ND_TOOL,
     ND_GUARD,
@@ -376,6 +385,14 @@ struct Node {
             McpPromptDecl *prompts;
             size_t prompt_len;
         } mcp_nd;
+
+        struct {
+            ExpectEntry *entries;
+            size_t entry_len;
+            bool has_errors_handler;
+            const char *err_var;
+            NodeList errors_body;
+        } expect_nd;
 
         struct {
             const char *name;

@@ -381,6 +381,23 @@ bool sema_analyze(Node *program, Arena *arena, DiagList *diags, SemaInfo *out) {
                     binds[bl++] = (BindingReq){ .kind = st->u.use_nd.kind, .name = st->u.use_nd.name, .span = st->span };
                 }
                 break;
+            case ND_EXPECT_CONFIG:
+                for (size_t j = 0; j < st->u.expect_nd.entry_len; j++) {
+                    const ExpectEntry *ent = &st->u.expect_nd.entries[j];
+                    if (ent->resource && ent->resource->kind == ND_INDEX &&
+                        ent->resource->u.idx.obj && ent->resource->u.idx.obj->kind == ND_GVAR) {
+                        const char *k = ent->resource->u.idx.obj->u.ident.name;
+                        const char *nm = (ent->resource->u.idx.idx &&
+                                          (ent->resource->u.idx.idx->kind == ND_SYMBOL || ent->resource->u.idx.idx->kind == ND_STRING))
+                                             ? ent->resource->u.idx.idx->u.str.text : "*";
+                        if (!is_valid_binding_kind(k)) {
+                            diag_error(diags, ent->span, "unknown resource registry '$%s' (expected $llm, $s1, $embedder, $db, $vector_db, $mcp, or $skills)", k);
+                        } else if (bl < 256) {
+                            binds[bl++] = (BindingReq){ .kind = k, .name = nm, .span = ent->span };
+                        }
+                    }
+                }
+                break;
             case ND_SCHEMA:
                 if (sl < 256) schemas[sl++] = st;
                 break;

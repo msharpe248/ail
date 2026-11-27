@@ -7,10 +7,11 @@
 
 .export AilInt, AilFloat, AilBool, AilSym, AilDur, AilRange, AilRegex
 .export AilClosure, AilClass, AilObj, AilCell, AilExc, AilTool, AilGuard
-.export AilGuardResult, AilSchema, AilBudget, AilContext, AilDecideVal
+.export AilGuardResult, AilSchema, AilBudget, AilContext, AilDecideVal, AilResReg, AilResource
 .export init, mk_int, mk_float, mk_bool, mk_sym, mk_dur, mk_range, mk_regex
 .export mk_closure, mk_cell, cell_get, cell_set, mk_exc, mk_decide_val
 .export mk_class, class_def_method, mk_obj, mk_schema, mk_tool, mk_guard, mk_context
+.export mk_res_reg, check_expect_entry, raise_expect_errors
 .export is_truthy, to_str, to_i64, to_f64, wrap_json, unwrap_json
 .export exc_matches, exc_message
 .export op_add, op_sub, op_mul, op_div, op_mod, op_neg, op_not
@@ -122,6 +123,15 @@
     value: ref        ; AilSym (choice), AilInt (score), or AilFloat (prob)
     confidence: f64   ; calibrated confidence 0.0..1.0
     probs: ref        ; optional map of option -> AilFloat
+.ends
+
+.struct AilResReg
+    kind: ref         ; "llm", "s1", "embedder", "db", "vector_db", "mcp", "skills"
+.ends
+
+.struct AilResource
+    kind: ref
+    name: ref
 .ends
 
 ; ---- Module globals ----
@@ -369,6 +379,8 @@ zero:
     bisa v, AilFloat, is_flt
     bisa v, AilBool, is_bool
     bisa v, AilSym, is_sym
+    bisa v, AilResource, is_res
+    bisa v, AilResReg, is_rreg
     bisa v, AilDecideVal, is_dval
     bisa v, AilDur, is_dur
     bisa v, AilRange, is_rng
@@ -403,6 +415,11 @@ b_f:
     ret "false"
 is_sym:
     ret v->AilSym.name
+is_res:
+    ret v->AilResource.name
+is_rreg:
+    strcat R1, "$", v->AilResReg.kind
+    ret R1
 is_dval:
     call to_str (v->AilDecideVal.value) -> (R1)
     ret R1
@@ -956,6 +973,7 @@ e_cont:
     bisa a, AilFloat, e_flt
     bisa a, AilBool, e_bool
     bisa a, AilSym, e_sym
+    bisa a, AilResource, e_res
     typeof I0, a
     typeof I1, b
     bne I0, I1, eq_no
@@ -984,6 +1002,13 @@ e_bool:
 e_sym:
     bnisa b, AilSym, eq_no
     seq.r I2, a->AilSym.name, b->AilSym.name
+    ret I2
+e_res:
+    bnisa b, AilResource, eq_no
+    strcmp I2, a->AilResource.kind, b->AilResource.kind
+    bnz I2, eq_no
+    strcmp I2, a->AilResource.name, b->AilResource.name
+    seq I2, I2, 0
     ret I2
 e_str:
     strcmp I2, a, b
@@ -1103,12 +1128,29 @@ m_go:
 
 .func index_get(ref obj, ref idx) -> ref
     bz.r obj, ret_nil
+    bisa obj, AilResReg, ig_rreg
+    bisa obj, AilResource, ig_res
     typeof I0, obj
     beq I0, 5, ig_list
     beq I0, 6, ig_map
     beq I0, 1, ig_str
     bisa obj, AilObj, ig_obj
     ret null
+ig_rreg:
+    call to_str (idx) -> (R2)
+    new R3, AilResource
+    mov R3->AilResource.kind, obj->AilResReg.kind
+    mov R3->AilResource.name, R2
+    ret R3
+ig_res:
+    call cfg.get_binding_raw (obj->AilResource.kind, obj->AilResource.name) -> (R2)
+    bz.r R2, ret_nil
+    call wrap_json (R2) -> (R3)
+    typeof I1, R3
+    bne I1, 6, ret_nil
+    call to_str (idx) -> (R4)
+    mget.r R5, R3, R4, null
+    ret R5
 ig_list:
     call to_i64 (idx) -> (I1)
     len I2, obj
@@ -1142,10 +1184,16 @@ ret_nil:
 .endf
 
 .func index_set(ref obj, ref idx, ref val) -> ref
+    bisa obj, AilResReg, iset_rreg
     typeof I0, obj
     beq I0, 5, iset_list
     beq I0, 6, iset_map
     bisa obj, AilObj, iset_obj
+    ret val
+iset_rreg:
+    call to_str (idx) -> (R3)
+    call unwrap_json (val) -> (R4)
+    call cfg.set_binding_raw (obj->AilResReg.kind, R3, R4)
     ret val
 iset_list:
     call to_i64 (idx) -> (I1)
@@ -1397,6 +1445,7 @@ chk_dispatch:
     bisa recv, AilClosure, m_closure
     bisa recv, AilExc, m_exc
     bisa recv, AilDecideVal, m_dval
+    bisa recv, AilResource, m_res
     typeof I0, recv
     beq I0, 1, m_str
     beq I0, 5, m_list
@@ -2586,6 +2635,52 @@ no_method:
     strcat R4, "undefined method '", name, "'"
     call mk_exc ("NoMethodError", R4) -> (R5)
     throw R5
+
+; -- Resource reference methods ($llm[:fast].kind, .name, .key, .exists?, .to_h, .fetch, etc.) --
+m_res:
+    strcmp I1, name, "kind"
+    bnz I1, mres_name
+    call mk_sym (recv->AilResource.kind) -> (R4)
+    ret R4
+mres_name:
+    strcmp I1, name, "name"
+    bnz I1, mres_key
+    call mk_sym (recv->AilResource.name) -> (R4)
+    ret R4
+mres_key:
+    strcmp I1, name, "key"
+    bnz I1, mres_ex
+    strcat R4, recv->AilResource.kind, ".", recv->AilResource.name
+    ret R4
+mres_ex:
+    strcmp I1, name, "exists?"
+    bnz I1, mres_toh
+    call cfg.has_binding (recv->AilResource.kind, recv->AilResource.name) -> (I2)
+    call mk_bool (I2) -> (R4)
+    ret R4
+mres_toh:
+    strcmp I1, name, "to_h"
+    bz I1, mres_geth
+    strcmp I1, name, "config"
+    bnz I1, mres_delegate
+mres_geth:
+    call cfg.get_binding_raw (recv->AilResource.kind, recv->AilResource.name) -> (R4)
+    bz.r R4, mres_empty
+    call wrap_json (R4) -> (R5)
+    ret R5
+mres_empty:
+    mnew R5
+    ret R5
+mres_delegate:
+    call cfg.get_binding_raw (recv->AilResource.kind, recv->AilResource.name) -> (R4)
+    bnz.r R4, mres_wrap
+    mnew R5
+    jmp mres_fwd
+mres_wrap:
+    call wrap_json (R4) -> (R5)
+mres_fwd:
+    call send_msg (R5, name, args, block) -> (R6)
+    ret R6
 .endf
 
 ; ---- Builtin functions & stdlib modules ----
@@ -3167,6 +3262,8 @@ hb_y:
     beq I0, 9, i_dec
     beq I0, 5, i_list
     bisa v, AilSym, i_sym
+    bisa v, AilResource, i_res
+    bisa v, AilResReg, i_rreg
     call to_str (v) -> (R1)
     ret R1
 i_nil:
@@ -3180,6 +3277,12 @@ i_dec:
     ret R2
 i_sym:
     strcat R1, ":", v->AilSym.name
+    ret R1
+i_res:
+    strcat R1, "$", v->AilResource.kind, "[:", v->AilResource.name, "]"
+    ret R1
+i_rreg:
+    strcat R1, "$", v->AilResReg.kind
     ret R1
 i_list:
     bufnew R1, 0
@@ -3205,4 +3308,137 @@ il_d:
 .func debug_format(ref v) -> ref
     call inspect_str (v) -> (R1)
     ret R1
+.endf
+
+; ---- Typed resource registries ($llm, $s1, $db, ...) & `expect config` runtime ----
+
+.func mk_res_reg(ref kind) -> ref
+    strcmp I0, kind, "llm"
+    bz I0, mrr_ok
+    strcmp I0, kind, "s1"
+    bz I0, mrr_ok
+    strcmp I0, kind, "embedder"
+    bz I0, mrr_ok
+    strcmp I0, kind, "db"
+    bz I0, mrr_ok
+    strcmp I0, kind, "vector_db"
+    bz I0, mrr_ok
+    strcmp I0, kind, "mcp"
+    bz I0, mrr_ok
+    strcmp I0, kind, "skills"
+    bz I0, mrr_ok
+    strcat R2, "unknown resource registry '$", kind, "' (expected $llm, $s1, $embedder, $db, $vector_db, $mcp, or $skills)"
+    call mk_exc ("ConfigError", R2) -> (R3)
+    throw R3
+mrr_ok:
+    new R1, AilResReg
+    mov R1->AilResReg.kind, kind
+    ret R1
+.endf
+
+.func push_expect_err(ref errs, ref kind, ref name, ref reason)
+    mnew R4
+    call mk_sym (kind) -> (R5)
+    call mk_sym (name) -> (R6)
+    strcat R7, kind, ".", name
+    mset R4, "kind", R5
+    mset R4, "name", R6
+    mset R4, "key", R7
+    mset R4, "reason", reason
+    lpush errs, R4
+    ret
+.endf
+
+.func check_expect_entry(ref res, ref opts, ref errs_list)
+    bnisa res, AilResource, ce_bad_res
+    mov R3, res->AilResource.kind
+    mov R4, res->AilResource.name
+    call cfg.has_binding (R3, R4) -> (I0)
+    bnz I0, ce_present
+    call push_expect_err (errs_list, R3, R4, "not configured in .ail.env")
+    ret
+ce_present:
+    bz.r opts, ce_done
+    typeof I1, opts
+    bne I1, 6, ce_done
+    call cfg.get_binding_raw (R3, R4) -> (R5)
+    bz.r R5, ce_done
+    typeof I2, R5
+    bne I2, 6, ce_done
+
+    ; Check optional driver constraint
+    mhas I3, opts, "driver"
+    bz I3, ce_caps
+    mget.r R6, opts, "driver", null
+    call to_str (R6) -> (R7)
+    mget.r R8, R5, "driver", ""
+    strcmp I4, R7, R8
+    bz I4, ce_caps
+    strcat R9, "expected driver '", R7, "', got '", R8, "'"
+    call push_expect_err (errs_list, R3, R4, R9)
+
+ce_caps:
+    ; Check optional capabilities constraint (when binding explicitly declares capabilities)
+    mhas I3, opts, "capabilities"
+    bz I3, ce_done
+    mhas I4, R5, "capabilities"
+    bz I4, ce_done
+    mget.r R6, opts, "capabilities", null
+    mget.r R7, R5, "capabilities", null
+    bz.r R6, ce_done
+    bz.r R7, ce_done
+    typeof I5, R6
+    bne I5, 5, ce_done
+    typeof I6, R7
+    bne I6, 5, ce_done
+    len I7, R6
+    mov I8, 0
+ce_cloop:
+    bge I8, I7, ce_done
+    mov R8, R6[I8]
+    inc I8
+    call to_str (R8) -> (R9)
+    ; Search R9 in R7
+    len I9, R7
+    mov I10, 0
+ce_s:
+    bge I10, I9, ce_miss_cap
+    mov R10, R7[I10]
+    inc I10
+    call to_str (R10) -> (R11)
+    strcmp I11, R9, R11
+    bnz I11, ce_s
+    jmp ce_cloop
+ce_miss_cap:
+    strcat R12, "missing required capability ':", R9, "'"
+    call push_expect_err (errs_list, R3, R4, R12)
+    jmp ce_cloop
+
+ce_bad_res:
+    call mk_exc ("ConfigError", "expect config entries must be typed resources like $llm[:fast] or $db[:sessions]") -> (R3)
+    throw R3
+ce_done:
+    ret
+.endf
+
+.func raise_expect_errors(ref errs_list)
+    bufnew R1, 0
+    bufcat R1, "Config check failed:"
+    len I0, errs_list
+    mov I1, 0
+re_l:
+    bge I1, I0, re_d
+    mov R2, errs_list[I1]
+    inc I1
+    mget.r R3, R2, "key", "?"
+    mget.r R4, R2, "reason", "invalid"
+    bufcat R1, "\n  - "
+    bufcat R1, R3
+    bufcat R1, ": "
+    bufcat R1, R4
+    jmp re_l
+re_d:
+    strcat R5, R1
+    call mk_exc ("ConfigError", R5) -> (R6)
+    throw R6
 .endf

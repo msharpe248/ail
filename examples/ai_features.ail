@@ -1,11 +1,23 @@
 # examples/ai_features.ail — End-to-end AI runtime constructs on MLWSVM
 
-use llm: :fast
-use db: :sessions
+expect config do
+  $llm[:fast]
+  $db[:sessions]
+end
 
-# 1. Config-bound resource lookup (.ail.env)
-llm_cfg = Config.get(:llm, :fast)
-puts "cfg_model=#{llm_cfg["model"]}"
+# 1. Typed resource registry lookup (.ail.env) & graceful fallback via expect config
+puts "cfg_model=#{$llm[:fast]["model"]}"
+
+expect config do
+  $db[:fallback_db]
+errors |errs|
+  errs.each do |e|
+    if e.kind == :db
+      $db[:fallback_db] = { driver: "memory" }
+    end
+  end
+end
+puts "expect_fallback=#{$db[:fallback_db].exists?}:#{$db[:fallback_db]["driver"]}"
 
 # 2. Schema with compile-time JSON Schema + runtime validation
 schema Ticket
@@ -57,7 +69,7 @@ r2 = NoPII.check_output("User SSN is 123-45-6789")
 puts "guard=#{r1.allowed?}:#{r2.rejected?}:#{r2.reason}"
 
 # 5. Append-only Context with named non-destructive views + checkpoints
-ctx = Context.new(:sessions)
+ctx = Context.new($db[:sessions])
 ctx.append(:user, "Find the bug")
 snap = ctx.checkpoint
 ctx.append(:tool_intermediate, "grep noise")

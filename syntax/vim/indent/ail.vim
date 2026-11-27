@@ -6,15 +6,15 @@ endif
 let b:did_indent = 1
 
 setlocal indentexpr=GetAilIndent()
-setlocal indentkeys=0{,0},0),0],!^F,o,O,e,=end,=elsif,=else,=when,=rescue,=ensure
+setlocal indentkeys=0{,0},0),0],!^F,o,O,e,=end,=elsif,=else,=when,=rescue,=ensure,=errors
 
 if exists("*GetAilIndent")
   finish
 endif
 
-let s:open_re = '^\s*\(def\|class\|module\|schema\|tool\|guard\|skill\|decide\|agent\|flow\|within\|retry_up_to\|mcp_server\|a2a_agent\|if\|elsif\|else\|unless\|case\|when\|while\|until\|begin\|rescue\|ensure\)\>'
+let s:open_re = '^\s*\(def\|class\|module\|expect\|schema\|tool\|guard\|skill\|decide\|agent\|flow\|within\|retry_up_to\|mcp_server\|a2a_agent\|if\|elsif\|else\|unless\|case\|when\|while\|until\|begin\|rescue\|ensure\|errors\)\>'
 let s:do_re   = '\<do\>\(\s*|[^|]*|\)\?\s*\(#.*\)\?$'
-let s:mid_re  = '^\s*\(elsif\|else\|when\|rescue\|ensure\)\>'
+let s:mid_re  = '^\s*\(elsif\|else\|when\|rescue\|ensure\|errors\)\>'
 let s:end_re  = '^\s*end\>'
 
 function! GetAilIndent() abort

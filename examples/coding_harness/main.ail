@@ -9,12 +9,20 @@ require "./ui"
 require "./tools"
 require "./guards"
 
-use llm: :coder
+expect config do
+  $llm[:coder], capabilities: [:tools]
+errors |errs|
+  errs.each do |e|
+    eputs c_red("Config error for #{e.key}: #{e.reason}")
+  end
+  eputs "Run with: ./ail run examples/coding_harness/main.ail --env examples/coding_harness/ollama.ail.env"
+  OS.exit(1)
+end
 
 ALL_TOOLS = [list_files, read_file, search_files, write_file, edit_file, run_git_status]
 
 agent CodingAgent do
-  model        :coder
+  model        $llm[:coder]
   context_view :coder_view
   tools        [list_files, read_file, search_files, write_file, edit_file, run_git_status]
   guards       [WorkspaceGuard]
@@ -36,8 +44,7 @@ def new_harness_context
   c
 end
 
-cfg = Config.get(:llm, :coder)
-model_label = cfg.fetch("model", cfg.fetch("driver", "unknown"))
+model_label = $llm[:coder].fetch("model", $llm[:coder].fetch("driver", "unknown"))
 workspace = File.cwd
 
 ui_banner(model_label, workspace, HARNESS_STATE["auto_approve"])

@@ -1,11 +1,22 @@
 # examples/full_spec_check.ail — Exercises the full AIL grammar & static verifier
 
-use llm: :reasoning, capabilities: [:tools, :structured]
-use s1: :router
-use db: :sessions
-use vector_db: :kb
-use mcp: :github
-use skills: :workspace
+expect config do
+  $llm[:reasoning], capabilities: [:tools, :structured]
+  $s1[:router]
+  $db[:sessions]
+  $vector_db[:kb]
+  $mcp[:github]
+  $skills[:workspace]
+errors |errs|
+  errs.each do |e|
+    if e.kind == :db
+      $db[:sessions] = { driver: "memory" }
+    else
+      eputs "Missing #{e.key}: #{e.reason}"
+      OS.exit(1)
+    end
+  end
+end
 
 schema TicketState
   field :body, String, "Incoming ticket text"
@@ -22,7 +33,7 @@ end
 
 guard SafeClassifier do
   check_input do |msg, ctx|
-    verdict = decide using: :router, on: msg do
+    verdict = decide using: $s1[:router], on: msg do
       prob :prompt_injection?
     end
     reject("Injection suspected") if verdict.prompt_injection? > 0.8
@@ -38,11 +49,11 @@ skill :sql_migration, "Safely design SQL migrations" do
 end
 
 agent Researcher do
-  model        :reasoning
+  model        $llm[:reasoning]
   context_view :llm_compact
   tools        [lookup_order]
-  mcp          [:github]
-  skills       [:workspace, :sql_migration]
+  mcp          [$mcp[:github]]
+  skills       [$skills[:workspace], :sql_migration]
   guards       [SafeClassifier]
   capabilities fs: read_only("./")
   limits       max_turns: 8, cost: 0.25d, retries: 2
@@ -58,7 +69,7 @@ flow SupportFlow
 
   node :intake --> :triage
 
-  decide :triage, using: :router do
+  decide :triage, using: $s1[:router] do
     choice :queue, [:billing, :tech, :fraud]
     score  :urgency, 1..5
   end

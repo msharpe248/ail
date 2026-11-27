@@ -130,8 +130,15 @@ Exact arbitrary-precision base-10 decimal backed by MLWSVM `.dec`.
 * `JSON.parse(text)` → AIL `Hash` / `Array`
 * `JSON.stringify(val, indent = 0)` → `String`
 
+### Typed Resource Registries (`$llm`, `$s1`, `$embedder`, `$db`, `$vector_db`, `$mcp`, `$skills`) & `expect config`
+* `$llm[:fast]` → `AilResource` pointing to `llm.fast` in `.ail.env`. Valid registries: `$llm`, `$s1`, `$embedder`, `$db`, `$vector_db`, `$mcp`, `$skills`.
+* `$llm[:fast]["model"]`, `$llm[:fast].fetch("model", "unknown")`, `$llm[:fast].to_h` — read fields directly from the configured binding.
+* `$llm[:fast].exists?` → `Bool`; `.kind` → `:llm`; `.name` → `:fast`; `.key` → `"llm.fast"`.
+* `$db[:sessions] = { driver: "memory" }` — sets (or overwrites) a binding in the VM's shared environment (`env.set`), visible to all agents and spawned processes (`nil` deletes it).
+* `expect config do ... errors |errs| ... end` — validates all listed `$kind[:name]` entries (plus optional `driver:` and `capabilities:` constraints). Without `errors`, raises `ConfigError` listing all failures; with `errors |errs|`, each item has `.kind`, `.name`, `.key`, `.reason` so the program can install fallbacks or exit cleanly.
+
 ### `Config` & `Env`
-* `Config.get(kind, name)` → `Hash` (reads `<kind>.<name>` from MLWSVM `.ail.env`)
+* `Config.get(kind, name)` → `Hash` (low-level equivalent of `$kind[:name].to_h`)
 * `Config.load(path)` → loads a `.ail.env` file at runtime
 * `Env.get(name, default = nil)` → `String` or `nil` (reads OS environment variable via `os.env`)
 * `Env.has?(name)` → `Bool`

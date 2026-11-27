@@ -1,10 +1,21 @@
 # examples/agent_ollama.ail — Live local Ollama agent using tools, MCP, Skills & Guards
 # Run: ./ail run examples/agent_ollama.ail --env examples/ollama.ail.env
 
-use llm: :local
-use mcp: :repo_tools
-use skills: :local
-use db: :ollama_sessions
+expect config do
+  $llm[:local], capabilities: [:tools]
+  $mcp[:repo_tools]
+  $skills[:local]
+  $db[:ollama_sessions]
+errors |errs|
+  errs.each do |e|
+    if e.kind == :db
+      $db[:ollama_sessions] = { driver: "memory" }
+    else
+      eputs "Config error: #{e.key} (#{e.reason})"
+      OS.exit(1)
+    end
+  end
+end
 
 tool :multiply, "Multiply two integers and return their exact product" do
   param :a, Int, "First integer"
@@ -21,11 +32,11 @@ guard NoPII do
 end
 
 agent LocalAssistant do
-  model        :local
+  model        $llm[:local]
   context_view :llm_compact
   tools        [multiply]
-  mcp          [{ repo_tools: { only: [:word_count] } }]
-  skills       [:local]
+  mcp          [{ $mcp[:repo_tools] => { only: [:word_count] } }]
+  skills       [$skills[:local]]
   guards       [NoPII]
   limits       max_turns: 6
 
@@ -35,7 +46,7 @@ agent LocalAssistant do
   PROMPT
 end
 
-ctx = Context.new(db: :ollama_sessions)
+ctx = Context.new(db: $db[:ollama_sessions])
 ctx.define_view :llm_compact do |log|
   log.drop(:tool_intermediate)
 end

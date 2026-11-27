@@ -1,7 +1,9 @@
 # examples/a2a_support.ail — Live A2A Agent Server backed by a System 1 + Flow pipeline
 # Run: ./ail run examples/a2a_support.ail --env examples/flow_rag.ail.env -- --http 127.0.0.1:9000
 
-use s1: :router
+expect config do
+  $s1[:router]
+end
 
 def intake(text)
   { body: text, route: "unknown" }
@@ -23,7 +25,7 @@ flow TriageFlow
   start :intake
   node :intake --> :triage
 
-  decide :triage, using: :router do
+  decide :triage, using: $s1[:router] do
     choice :queue, [:billing, :tech, :fraud]
     score  :urgency, 1..5
   end

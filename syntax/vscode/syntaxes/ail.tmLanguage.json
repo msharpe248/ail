@@ -127,11 +127,11 @@
         },
         {
           "name": "keyword.other.directive.ail",
-          "match": "\\b(field|param|returns|capabilities|limits|model|system|tools|mcp|skills|guards|context_view|check_input|check_output|check_tool|instructions|choice|score|prob|start|node|edge|expose|resource|prompt|handle)\\b"
+          "match": "\\b(config|errors|field|param|returns|capabilities|limits|model|system|tools|mcp|skills|guards|context_view|check_input|check_output|check_tool|instructions|choice|score|prob|start|node|edge|expose|resource|prompt|handle)\\b"
         },
         {
           "name": "keyword.control.import.ail",
-          "match": "\\b(use|require|require_relative|include)\\b"
+          "match": "\\b(expect|require|require_relative|include)\\b"
         },
         {
           "name": "keyword.control.ail",
@@ -204,6 +204,10 @@
         {
           "name": "variable.other.readwrite.instance.ail",
           "match": "@[a-zA-Z_][a-zA-Z0-9_]*"
+        },
+        {
+          "name": "variable.other.readwrite.global.ail",
+          "match": "\\$(llm|s1|embedder|db|vector_db|mcp|skills)\\b"
         }
       ]
     },

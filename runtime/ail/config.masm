@@ -1,7 +1,7 @@
 ; ail.config - Unified named resource bindings backed by MLWSVM env.*
 
 .module ail.config
-.export load_env, has_binding, get_binding_raw, require_binding
+.export load_env, has_binding, get_binding_raw, set_binding_raw, require_binding
 
 ; load_env(path): load a .ail.env / .mlws.env file into this process's environment
 .func load_env(ref path)
@@ -21,6 +21,16 @@
     strcat R2, kind, ".", name
     ncall "env.get" (R2, null) -> (R3)
     ret R3
+.endf
+
+; set_binding_raw(kind, name, val): set or delete a binding in the VM environment
+.func set_binding_raw(ref kind, ref name, ref val)
+    strcat R3, kind, ".", name
+    bz.r val, 1f
+    ncall "env.set" (R3, val)
+    ret
+1:  ncall "env.delete" (R3)
+    ret
 .endf
 
 ; require_binding(kind, name) -> ref (raises Error if missing)

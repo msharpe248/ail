@@ -1,12 +1,14 @@
 # examples/flow_rag_demo.ail — End-to-end v0.3.0 test:
 # System 1 decide + stateful flow with confidence escalation & bounded cycle + Knowledge/RAG
 
-use s1: :router
-use embedder: :docs
-use vector_db: :kb
+expect config do
+  $s1[:router]
+  $embedder[:docs]
+  $vector_db[:kb]
+end
 
 # 1. Direct System 1 `decide` expression
-d1 = decide using: :router, on: "Double charge on invoice #99" do
+d1 = decide using: $s1[:router], on: "Double charge on invoice #99" do
   choice :queue, [:billing, :tech, :fraud]
   score  :urgency, 1..5
   prob   :duplicate?
@@ -50,7 +52,7 @@ flow SupportFlow
   start :intake
   node :intake --> :triage
 
-  decide :triage, using: :router do
+  decide :triage, using: $s1[:router] do
     choice :queue, [:billing, :tech, :fraud]
     score  :urgency, 1..5
   end
@@ -74,7 +76,7 @@ r_esc = SupportFlow.run({ body: "Ambiguous general question", revisions: 0, appr
 puts "flow_escalate_bounded=#{r_esc}"
 
 # 3. Pluggable RAG: Knowledge + flat f32 vector_db + metadata filter
-kb = Knowledge.new(vector_db: :kb)
+kb = Knowledge.new(vector_db: $vector_db[:kb])
 kb.ingest("doc_c",   "MLWSVM register machine virtual machine written in C11", { lang: "c" })
 kb.ingest("doc_ail", "AIL ruby syntax agents guardrails and MCP servers",       { lang: "ail" })
 kb.ingest("doc_py",  "Python data science notebooks and plotting",              { lang: "py" })

@@ -2,10 +2,12 @@
 # Uses MLWSVM v0.30.0 std.http streaming (http.open / http.read_chunk / http.close)
 # Run: ./ail run examples/stream_ollama.ail --env examples/ollama_v03.ail.env
 
-use llm: :local
+expect config do
+  $llm[:local]
+end
 
 agent Streamer do
-  model  :local
+  model  $llm[:local]
   limits max_turns: 2
 
   system <<~PROMPT
