@@ -1,0 +1,46 @@
+{
+  "name": "ail-lang",
+  "displayName": "AIL (AI Language)",
+  "description": "Syntax highlighting and language support for AIL (.ail) and .ail.env config files",
+  "version": "0.5.0",
+  "publisher": "msharpe248",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/msharpe248/ail.git"
+  },
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "ail",
+        "aliases": ["AIL", "ail"],
+        "extensions": [".ail"],
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "ail-env",
+        "aliases": ["AIL Env", "ail-env"],
+        "extensions": [".ail.env"],
+        "filenamePatterns": ["*.ail.env"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "ail",
+        "scopeName": "source.ail",
+        "path": "./syntaxes/ail.tmLanguage.json"
+      },
+      {
+        "language": "ail-env",
+        "scopeName": "source.ail.env",
+        "path": "./syntaxes/ail-env.tmLanguage.json"
+      }
+    ]
+  }
+}

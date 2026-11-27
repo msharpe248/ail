@@ -102,7 +102,8 @@ ail version                               Print version
 | [`runtime/ail/`](runtime/ail/README.md) | Layered MLWSVM `0.30.0` runtime modules (`core`, `agent`, `llm`, `mcp`, `skill`, `context`, `budget`, `s1`, `flow`, `vector`, `a2a`) |
 | [`examples/`](examples/README.md) | Runnable single-file & multi-file examples ([`support_desk/`](examples/support_desk/README.md)), plus mock and Ollama `.ail.env` configs |
 | [`docs/`](docs/README.md) | Programming Guide, Standard Library Reference, Examples Index, and Language Spec |
-| [`tests/`](tests/README.md) | End-to-end deterministic test suite (26 tests) and negative compile-time fixtures |
+| [`syntax/`](syntax/README.md) | Editor syntax highlighting for Vim/Neovim, VS Code/Cursor, Emacs, Nano, and `bat` |
+| [`tests/`](tests/README.md) | End-to-end deterministic test suite (31 tests) and negative compile-time fixtures |
 
 ---
 
