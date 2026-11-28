@@ -282,12 +282,10 @@ s1_chk_think:
     mget I4, scfg, "think", 1
 .endtry
     bnz I4, s1_think_t
-    ncall "json.parse" ("{\"think\":false}") -> (R13)
-    jmp s1_think_m
+    mset R12, "think", false
+    jmp s1_mk_json
 s1_think_t:
-    ncall "json.parse" ("{\"think\":true}") -> (R13)
-s1_think_m:
-    ncall "map.union" (R12, R13) -> (R12)
+    mset R12, "think", true
     jmp s1_mk_json
 s1_think_err:
     catch R13

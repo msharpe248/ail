@@ -7,7 +7,7 @@ MLWSVM  ?= $(shell if [ -x ../mlws-vm/mlwsvm ]; then echo ../mlws-vm/mlwsvm; els
 SRCS := src/main.c src/util.c src/lexer.c src/ast.c src/parser.c src/sema.c src/codegen.c
 OBJS := $(patsubst src/%.c,build/%.o,$(SRCS))
 
-.PHONY: all clean test test-ollama check-examples
+.PHONY: all clean test test-ollama check-examples lint-runtime
 
 all: ail
 
@@ -33,6 +33,11 @@ check-examples: ail
 		echo "CHECK $$f"; \
 		./ail check "$$f" || exit 1; \
 	done
+
+lint-runtime:
+	@for f in runtime/ail/*.masm; do \
+		"$(MLWSVM)" asm -W "$$f" -o /tmp/ail_lint_out.mlwso || exit 1; \
+	done; rm -f /tmp/ail_lint_out.mlwso; echo "lint-runtime: all runtime modules clean!"
 
 clean:
 	rm -rf build ail

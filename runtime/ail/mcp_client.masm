@@ -27,10 +27,10 @@
     bz.r params, 1f
     mset R4, "params", params
 1:  bz expect_reply, 2f
-    mov I0, cl->McpClient.next_id
-    inc I0
-    mov cl->McpClient.next_id, I0
-    mset R4, "id", I0
+    mov I7, cl->McpClient.next_id
+    inc I7
+    mov cl->McpClient.next_id, I7
+    mset R4, "id", I7
 2:  ncall "json.stringify" (R4, 0) -> (R5)
 
     strcmp I1, cl->McpClient.transport, "stdio"
@@ -161,21 +161,30 @@ bad_cfg:
     bz.r cl, 9f
     strcmp I0, cl->McpClient.transport, "stdio"
     bnz I0, 9f
-.try 1f
+.try cl_e1
     bz.r cl->McpClient.in_h, 1f
     ncall "fs.close" (cl->McpClient.in_h)
 .endtry
+    jmp 1f
+cl_e1:
+    catch R9
 1:
-.try 2f
+.try cl_e2
     bz.r cl->McpClient.out_h, 2f
     ncall "fs.close" (cl->McpClient.out_h)
 .endtry
+    jmp 2f
+cl_e2:
+    catch R9
 2:
-.try 9f
+.try cl_e3
     bz.r cl->McpClient.proc, 9f
     ncall "os.kill" (cl->McpClient.proc, false)
     ncall "os.wait" (cl->McpClient.proc) -> (I1)
 .endtry
+    jmp 9f
+cl_e3:
+    catch R9
 9:  ret
 .endf
 

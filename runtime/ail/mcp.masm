@@ -519,9 +519,12 @@ http_wait:
     ncall "os.trap" ("SIGHUP", PID)
     ncall "os.env" ("AIL_ENV_FILE") -> (R12)
     bz.r R12, http_wait
-.try http_wait
+.try http_reload_err
     ncall "env.load" (R12)
 .endtry
+    jmp http_wait
+http_reload_err:
+    catch R13
     jmp http_wait
 http_shutdown:
     strcat R12, "ail mcp_server '", srv->McpServer.name, "' shutting down cleanly (", R11, ")\n"

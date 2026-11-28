@@ -70,7 +70,7 @@ none:
     bz.r path, done
     ncall "fs.exists" (path) -> (I0)
     bz I0, done
-.try done
+.try lj_err
     ncall "fs.read_file" (path) -> (R2)
     strcat R3, R2
     ncall "text.lines" (R3) -> (R4)
@@ -88,13 +88,16 @@ ll:
     lpush R1, R7
     jmp ll
 .endtry
+    jmp done
+lj_err:
+    catch R9
 done:
     ret R1
 .endf
 
 .func persist_event(ref path, ref ev_map)
     bz.r path, 9f
-.try 9f
+.try pe_err
     call core.unwrap_json (ev_map) -> (R2)
     ncall "json.stringify" (R2, 0) -> (R3)
     strcat R4, R3, "\n"
@@ -102,12 +105,15 @@ done:
     ncall "fs.write" (R5, R4)
     ncall "fs.close" (R5)
 .endtry
+    jmp 9f
+pe_err:
+    catch R9
 9:  ret
 .endf
 
 .func rewrite_jsonl(ref path, ref ev_list)
     bz.r path, 9f
-.try 9f
+.try rw_err
     bufnew R2, 0
     len I0, ev_list
     mov I1, 0
@@ -122,6 +128,9 @@ done:
 2:  strcat R6, R2
     ncall "fs.write_file" (path, R6)
 .endtry
+    jmp 9f
+rw_err:
+    catch R9
 9:  ret
 .endf
 

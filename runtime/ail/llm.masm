@@ -136,12 +136,10 @@ chk_think:
     mget I1, mcfg, "think", 1
 .endtry
     bnz I1, think_true
-    ncall "json.parse" ("{\"think\":false}") -> (R5)
-    jmp think_merge
+    mset R3, "think", false
+    jmp chk_opts
 think_true:
-    ncall "json.parse" ("{\"think\":true}") -> (R5)
-think_merge:
-    ncall "map.union" (R3, R5) -> (R3)
+    mset R3, "think", true
     jmp chk_opts
 think_err:
     catch R9
@@ -244,10 +242,13 @@ tc_empty_args:
     mnew R26
     jmp tc_store
 tc_parse_args:
-.try tc_empty_args
+.try tc_parse_err
     ncall "json.parse" (R25) -> (R26)
 .endtry
     jmp tc_store
+tc_parse_err:
+    catch R26
+    jmp tc_empty_args
 tc_args_ready:
     mov R26, R25
 tc_store:
@@ -308,7 +309,7 @@ bad_resp:
     bz I3, 9f
     strcmp I4, R5, "[DONE]"
     bz I4, 9f
-.try 9f
+.try sse_bad_json
     ncall "json.parse" (R5) -> (R6)
 .endtry
     mget.r R7, R6, "choices", null
@@ -367,6 +368,8 @@ have_slot:
     mget.r R17, R16, "args_buf", null
     bufcat R17, R21
     jmp tcd_l
+sse_bad_json:
+    catch R9
 9:  ret
 .endf
 
@@ -386,8 +389,8 @@ have_slot:
     substr R5, R5, 0, I2
 2:  strcat R8, R5, "/chat/completions"
 
-    ; Parse {"stream":true} so JSON gets a true boolean tag!
-    ncall "json.parse" ("{\"stream\":true}") -> (R9)
+    mnew R9
+    mset R9, "stream", true
     mset R9, "model", R6
     mset R9, "messages", msgs
     bz.r tools_spec, 3f
@@ -454,9 +457,12 @@ ftc_l:
     mnew R25
     len I12, R24
     bz I12, ftc_add
-.try ftc_add
+.try ftc_parse_err
     ncall "json.parse" (R24) -> (R25)
 .endtry
+    jmp ftc_add
+ftc_parse_err:
+    catch R26
 ftc_add:
     mnew R26
     mget.r R27, R22, "id", "call_0"
