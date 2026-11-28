@@ -19,7 +19,8 @@ AIL is written in **plain C11 with zero external compiler dependencies** and com
 | Document | Description |
 |---|---|
 | [Programming Guide](docs/GUIDE.md) | End-to-end tutorial from Hello World to multi-file agents, streaming, flows, RAG, MCP, and A2A |
-| [Standard Library & Runtime Reference](docs/STDLIB.md) | Complete API reference for core types, stdlib modules, AI runtime objects, exceptions, and `.ail.env` |
+| [Class & Type Reference](docs/CLASSES.md) | Complete, self-contained reference for every class, built-in type, AI runtime object, module, and exception in AIL |
+| [Standard Library & `.ail.env` Reference](docs/STDLIB.md) | Quick API cheat sheet and `.ail.env` driver configuration schemas |
 | [Worked Examples Index](docs/EXAMPLES.md) | Catalog of runnable single-file, multi-file, mock, and live Ollama examples |
 | [Language Specification](docs/SPEC.md) | Concise language overview, constructs, and version history (`v0.1.0`–`v0.5.0`) |
 
