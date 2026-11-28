@@ -265,7 +265,7 @@ def setup_seat(id, label, desc, agent_obj, res_ref, handles)
   card = nil
   begin
     cl = A2A.connect(url)
-    card = cl.fetch_card()
+    card = cl.card
   rescue A2AError => e
     eputs "\e[31mFailed to connect to A2A player '#{label}' at #{url}: #{e.message}\e[0m"
     handles.each { |h| h.stop }
