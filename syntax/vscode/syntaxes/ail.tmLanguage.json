@@ -163,7 +163,7 @@
       "patterns": [
         {
           "name": "support.class.ail",
-          "match": "\\b(Int|Float|Decimal|Bool|String|Array|Hash|Range|Regex|Symbol|Duration|Any|Enum|Context|LogView|Knowledge|MCP|Config|File|Files|Path|OS|JSON|Env|Time|Math|Random|Agent|Flow|Schema|Tool|Guard|GuardResult|RuntimeError|TypeError|NoMethodError|KeyError|SchemaError|PermissionError|BudgetExceeded|GuardViolation|GuardEscalation|ConfigError|LLMError|System1Error|MCPError|ToolError|EmbedderError|VectorError|FlowError)\\b"
+          "match": "\\b(Int|Float|Decimal|Bool|String|Array|Hash|Range|Regex|Symbol|Duration|Any|Enum|Context|LogView|Knowledge|MCP|A2A|Config|File|Files|Path|OS|JSON|Env|Time|Math|Random|Agent|Flow|Schema|Tool|Guard|GuardResult|RuntimeError|TypeError|NoMethodError|KeyError|SchemaError|PermissionError|BudgetExceeded|GuardViolation|GuardEscalation|ConfigError|LLMError|System1Error|MCPError|A2AError|ToolError|EmbedderError|VectorError|FlowError)\\b"
         }
       ]
     },
@@ -207,7 +207,7 @@
         },
         {
           "name": "variable.other.readwrite.global.ail",
-          "match": "\\$(llm|s1|embedder|db|vector_db|mcp|skills)\\b"
+          "match": "\\$(llm|s1|embedder|db|vector_db|mcp|skills|a2a)\\b"
         }
       ]
     },

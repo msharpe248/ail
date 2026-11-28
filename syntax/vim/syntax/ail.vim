@@ -43,11 +43,11 @@ syn keyword ailBuiltin      allow reject redact escalate
 
 " Built-in modules, AI runtime types, primitive types & exceptions
 syn keyword ailType         Int Float Decimal Bool String Array Hash Range Regex Symbol Duration Any Enum
-syn keyword ailType         Context LogView Knowledge MCP Config File Files Path OS JSON Env Time Math Random
+syn keyword ailType         Context LogView Knowledge MCP A2A Config File Files Path OS JSON Env Time Math Random
 syn keyword ailType         Agent Flow Schema Tool Guard GuardResult
 syn keyword ailExceptionCls RuntimeError TypeError NoMethodError KeyError SchemaError
 syn keyword ailExceptionCls PermissionError BudgetExceeded GuardViolation GuardEscalation
-syn keyword ailExceptionCls ConfigError LLMError System1Error MCPError ToolError
+syn keyword ailExceptionCls ConfigError LLMError System1Error MCPError A2AError ToolError
 syn keyword ailExceptionCls EmbedderError VectorError FlowError
 
 " Function / method / class / AI construct names after declaration keyword
@@ -56,7 +56,7 @@ syn match   ailTypeName     "\<\(class\|module\|schema\|guard\|agent\|flow\)\s\+
 
 " Instance variables & typed resource registries ($llm, $s1, $db, $mcp, ...)
 syn match   ailIvar         "@[a-zA-Z_][a-zA-Z0-9_]*"
-syn match   ailResReg       "\$\(llm\|s1\|embedder\|db\|vector_db\|mcp\|skills\)\>"
+syn match   ailResReg       "\$\(llm\|s1\|embedder\|db\|vector_db\|mcp\|skills\|a2a\)\>"
 
 " Keyword argument / hash labels (foo:) and symbols (:foo, :foo?)
 syn match   ailLabel        "\<[a-zA-Z_][a-zA-Z0-9_]*[?!]\?:\ze[^:]"

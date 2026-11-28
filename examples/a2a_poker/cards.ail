@@ -1,0 +1,208 @@
+# examples/a2a_poker/cards.ail — 52-card deck, ANSI rendering, and exact 7-card Texas Hold'em evaluator
+
+RANK_NAMES = {
+  "2" => "2", "3" => "3", "4" => "4", "5" => "5", "6" => "6",
+  "7" => "7", "8" => "8", "9" => "9", "10" => "10",
+  "11" => "J", "12" => "Q", "13" => "K", "14" => "A"
+}
+
+RANK_WORDS = {
+  "2" => "Twos", "3" => "Threes", "4" => "Fours", "5" => "Fives", "6" => "Sixes",
+  "7" => "Sevens", "8" => "Eights", "9" => "Nines", "10" => "Tens",
+  "11" => "Jacks", "12" => "Queens", "13" => "Kings", "14" => "Aces"
+}
+
+SUIT_GLYPHS = { "S" => "♠", "H" => "♥", "D" => "♦", "C" => "♣" }
+
+def card_plain(c)
+  r = RANK_NAMES[c["rank"].to_s]
+  "#{r}#{c["suit"]}"
+end
+
+def card_pretty(c)
+  r = RANK_NAMES[c["rank"].to_s]
+  s = c["suit"]
+  g = SUIT_GLYPHS[s]
+  if s == "H" || s == "D"
+    "\e[1;31m#{r}#{g}\e[0m"
+  else
+    "\e[1;37m#{r}#{g}\e[0m"
+  end
+end
+
+def cards_pretty(list)
+  return "(none)" if list.empty?
+  list.map { |c| card_pretty(c) }.join(" ")
+end
+
+def cards_plain(list)
+  return "none" if list.empty?
+  list.map { |c| card_plain(c) }.join(" ")
+end
+
+def new_shuffled_deck
+  suits = ["S", "H", "D", "C"]
+  deck = []
+  suits.each do |s|
+    r = 2
+    while r <= 14
+      deck.push({ rank: r, suit: s })
+      r += 1
+    end
+  end
+  # Fisher-Yates shuffle
+  i = deck.size - 1
+  while i > 0
+    j = Random.int(0, i)
+    tmp = deck[i]
+    deck[i] = deck[j]
+    deck[j] = tmp
+    i -= 1
+  end
+  deck
+end
+
+# Sort an array of integers descending
+def sort_desc(nums)
+  nums.sort.reverse
+end
+
+# Find highest straight top card from a list of ranks (returns 0 if none; 5 for A-2-3-4-5 wheel)
+def best_straight_high(ranks)
+  uniq = sort_desc(ranks.uniq)
+  return 0 if uniq.size < 5
+  i = 0
+  while i <= uniq.size - 5
+    top = uniq[i]
+    if uniq[i + 1] == top - 1 && uniq[i + 2] == top - 2 && uniq[i + 3] == top - 3 && uniq[i + 4] == top - 4
+      return top
+    end
+    i += 1
+  end
+  # Check A-2-3-4-5 wheel
+  if uniq.include?(14) && uniq.include?(5) && uniq.include?(4) && uniq.include?(3) && uniq.include?(2)
+    return 5
+  end
+  0
+end
+
+# Pack category (0..8) and up to 5 tie-breaker ranks (0..14) into a single comparable Int
+def pack_score(cat, r1, r2 = 0, r3 = 0, r4 = 0, r5 = 0)
+  cat * 1_000_000 + r1 * 50625 + r2 * 3375 + r3 * 225 + r4 * 15 + r5
+end
+
+# Evaluate the best 5-card Texas Hold'em hand from 5..7 cards
+def evaluate_hand(cards)
+  ranks = cards.map { |c| c["rank"] }
+
+  # Group cards by suit to check Flush & Straight Flush
+  by_suit = { "S" => [], "H" => [], "D" => [], "C" => [] }
+  cards.each do |c|
+    by_suit[c["suit"]].push(c["rank"])
+  end
+
+  flush_ranks = nil
+  ["S", "H", "D", "C"].each do |s|
+    if by_suit[s].size >= 5
+      flush_ranks = sort_desc(by_suit[s])
+    end
+  end
+
+  if flush_ranks != nil
+    sf_high = best_straight_high(flush_ranks)
+    if sf_high > 0
+      label = sf_high == 14 ? "Royal Flush!" : "Straight Flush (#{RANK_NAMES[sf_high.to_s]}-high)"
+      return { score: pack_score(8, sf_high), name: label }
+    end
+  end
+
+  # Count rank frequencies
+  counts = {}
+  ranks.each do |r|
+    k = r.to_s
+    counts[k] = counts.fetch(k, 0) + 1
+  end
+
+  quads = []
+  trips = []
+  pairs = []
+  singles = []
+  r = 14
+  while r >= 2
+    cnt = counts.fetch(r.to_s, 0)
+    if cnt == 4
+      quads.push(r)
+    elsif cnt == 3
+      trips.push(r)
+    elsif cnt == 2
+      pairs.push(r)
+    elsif cnt == 1
+      singles.push(r)
+    end
+    r -= 1
+  end
+
+  # Four of a Kind
+  if quads.size > 0
+    q = quads[0]
+    kickers = sort_desc(ranks.select { |x| x != q })
+    k1 = kickers.size > 0 ? kickers[0] : 0
+    return { score: pack_score(7, q, k1), name: "Four of a Kind (#{RANK_WORDS[q.to_s]})" }
+  end
+
+  # Full House
+  if trips.size > 0 && (trips.size >= 2 || pairs.size > 0)
+    t = trips[0]
+    p = trips.size >= 2 ? trips[1] : pairs[0]
+    return { score: pack_score(6, t, p), name: "Full House (#{RANK_WORDS[t.to_s]} full of #{RANK_WORDS[p.to_s]})" }
+  end
+
+  # Flush
+  if flush_ranks != nil
+    return {
+      score: pack_score(5, flush_ranks[0], flush_ranks[1], flush_ranks[2], flush_ranks[3], flush_ranks[4]),
+      name:  "Flush (#{RANK_NAMES[flush_ranks[0].to_s]}-high)"
+    }
+  end
+
+  # Straight
+  st_high = best_straight_high(ranks)
+  if st_high > 0
+    return { score: pack_score(4, st_high), name: "Straight (#{RANK_NAMES[st_high.to_s]}-high)" }
+  end
+
+  # Three of a Kind
+  if trips.size > 0
+    t = trips[0]
+    ks = sort_desc(ranks.select { |x| x != t })
+    k1 = ks.size > 0 ? ks[0] : 0
+    k2 = ks.size > 1 ? ks[1] : 0
+    return { score: pack_score(3, t, k1, k2), name: "Three of a Kind (#{RANK_WORDS[t.to_s]})" }
+  end
+
+  # Two Pair
+  if pairs.size >= 2
+    p1 = pairs[0]
+    p2 = pairs[1]
+    ks = sort_desc(ranks.select { |x| x != p1 && x != p2 })
+    k1 = ks.size > 0 ? ks[0] : 0
+    return { score: pack_score(2, p1, p2, k1), name: "Two Pair (#{RANK_WORDS[p1.to_s]} & #{RANK_WORDS[p2.to_s]})" }
+  end
+
+  # One Pair
+  if pairs.size == 1
+    p1 = pairs[0]
+    ks = sort_desc(ranks.select { |x| x != p1 })
+    k1 = ks.size > 0 ? ks[0] : 0
+    k2 = ks.size > 1 ? ks[1] : 0
+    k3 = ks.size > 2 ? ks[2] : 0
+    return { score: pack_score(1, p1, k1, k2, k3), name: "Pair of #{RANK_WORDS[p1.to_s]}" }
+  end
+
+  # High Card
+  top5 = sort_desc(ranks)
+  {
+    score: pack_score(0, top5[0], top5[1], top5[2], top5[3], top5[4]),
+    name:  "High Card (#{RANK_NAMES[top5[0].to_s]})"
+  }
+end

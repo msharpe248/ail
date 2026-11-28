@@ -130,8 +130,8 @@ Exact arbitrary-precision base-10 decimal backed by MLWSVM `.dec`.
 * `JSON.parse(text)` → AIL `Hash` / `Array`
 * `JSON.stringify(val, indent = 0)` → `String`
 
-### Typed Resource Registries (`$llm`, `$s1`, `$embedder`, `$db`, `$vector_db`, `$mcp`, `$skills`) & `expect config`
-* `$llm[:fast]` → `AilResource` pointing to `llm.fast` in `.ail.env`. Valid registries: `$llm`, `$s1`, `$embedder`, `$db`, `$vector_db`, `$mcp`, `$skills`.
+### Typed Resource Registries (`$llm`, `$s1`, `$embedder`, `$db`, `$vector_db`, `$mcp`, `$skills`, `$a2a`) & `expect config`
+* `$llm[:fast]` → `AilResource` pointing to `llm.fast` in `.ail.env`. Valid registries: `$llm`, `$s1`, `$embedder`, `$db`, `$vector_db`, `$mcp`, `$skills`, `$a2a`.
 * `$llm[:fast]["model"]`, `$llm[:fast].fetch("model", "unknown")`, `$llm[:fast].to_h` — read fields directly from the configured binding.
 * `$llm[:fast].exists?` → `Bool`; `.kind` → `:llm`; `.name` → `:fast`; `.key` → `"llm.fast"`.
 * `$db[:sessions] = { driver: "memory" }` — sets (or overwrites) a binding in the VM's shared environment (`env.set`), visible to all agents and spawned processes (`nil` deletes it).
@@ -197,8 +197,15 @@ Exact arbitrary-precision base-10 decimal backed by MLWSVM `.dec`.
 * `kb.size` / `kb.count` → `Int`.
 
 ### `MCP` Client
-* `cl = MCP.connect(:binding)` — connects via `stdio` or Streamable HTTP.
+* `cl = MCP.connect($mcp[:binding])` — connects via `stdio` or Streamable HTTP.
 * `cl.list_tools` → `Array[Hash]`, `cl.call_tool(:name, args_hash)` → `String`, `cl.read_resource(uri)` → `String`, `cl.close`.
+
+### `A2A` Client & Embedded Server
+* `srv = A2A.start(name, handler, host: "127.0.0.1", port: 0, version: "1.0.0", description: "...")` — starts a non-blocking A2A HTTP server in a background MLWSVM process (`port: 0` picks a free ephemeral port). Returns handle with `.url`, `.port`, `.name`, `.stop`.
+* `cl = A2A.connect(url_or_binding, timeout_ms: 120000)` — connects to an A2A agent URL or `$a2a[:name]` binding.
+* `cl.card` → fetches `GET /.well-known/agent.json` Agent Card as a `Hash`.
+* `cl.send(text, id: ...)` → sends JSON-RPC 2.0 `message/send` and returns the agent's reply `String` (raises `A2AError` on HTTP/RPC/task failure).
+* `cl.send_task(text, id: ...)`, `cl.get_task(id)`, `cl.cancel(id)` → return full A2A Task `Hash`.
 
 ---
 

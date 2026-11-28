@@ -4,14 +4,20 @@
 
 .module ail.a2a
 .import ail.core as core
+.import ail.config as cfg
 .import std.http as http
-.export serve
+.export serve, connect_obj, start_obj
+
+a2a_inited:     .i64 0
+a2a_client_cls: .zero 8
+a2a_handle_cls: .zero 8
 
 .struct A2aServer
     name: ref
     version: ref
     description: ref
     handler: ref      ; Agent, Flow, Tool, or Closure
+    url: ref          ; advertised base URL
     tasks_pid: i64    ; actor process holding task store
 .ends
 
@@ -201,6 +207,7 @@ chk_card:
     strcmp I1, R4, "/.well-known/agent-card.json"
     bnz I1, not_found
 serve_card:
+    mov R2, R1->A2aServer.url
     call build_agent_card (R1, R2) -> (R7)
     mnew R5
     mset R5, "status", 200
@@ -393,15 +400,16 @@ start_srv:
     call core.to_str (desc) -> (R10)
     mov R9->A2aServer.description, R10
     mov R9->A2aServer.handler, handler
+    mov R9->A2aServer.url, ""
     mov R9->A2aServer.tasks_pid, I8
 
-    tostr R11, I0
-    strcat R12, "http://", R4, ":", R11
-    closure a2a_http_handler (R9, R12) -> (R13)
+    closure a2a_http_handler (R9, "") -> (R13)
     call http.start (R4, I0, R13) -> (I9, I10)
-    ncall "fs.stderr" -> (R14)
     tostr R15, I10
-    strcat R16, "ail a2a_agent '", name, "' listening on http://", R4, ":", R15, "\n"
+    strcat R12, "http://", R4, ":", R15
+    mov R9->A2aServer.url, R12
+    ncall "fs.stderr" -> (R14)
+    strcat R16, "ail a2a_agent '", name, "' listening on ", R12, "\n"
     ncall "fs.write" (R14, R16)
     ; Trap SIGINT, SIGTERM, SIGHUP for graceful shutdown & .ail.env reload (MLWSVM v0.30.0)
     ncall "os.trap" ("SIGINT", PID)
@@ -418,9 +426,12 @@ a2a_wait:
     ncall "os.trap" ("SIGHUP", PID)
     ncall "os.env" ("AIL_ENV_FILE") -> (R19)
     bz.r R19, a2a_wait
-.try a2a_wait
+.try a2a_reload_err
     ncall "env.load" (R19)
 .endtry
+    jmp a2a_wait
+a2a_reload_err:
+    catch R20
     jmp a2a_wait
 a2a_shutdown:
     strcat R19, "ail a2a_agent '", name, "' shutting down cleanly (", R18, ")\n"
@@ -429,4 +440,343 @@ a2a_shutdown:
     ncall "os.exit" (0)
 a2a_done:
     ret
+.endf
+
+; ---- Non-blocking A2A.start(name, handler, host:, port:, version:, description:) ----
+
+.func handle_url(ref self_v, ref args, ref block) -> ref
+    mget.r R3, self_v->core.AilObj.fields, "url", ""
+    ret R3
+.endf
+
+.func handle_port(ref self_v, ref args, ref block) -> ref
+    mget.r R3, self_v->core.AilObj.fields, "port", null
+    ret R3
+.endf
+
+.func handle_name(ref self_v, ref args, ref block) -> ref
+    mget.r R3, self_v->core.AilObj.fields, "name", ""
+    ret R3
+.endf
+
+.func handle_stop(ref self_v, ref args, ref block) -> ref
+    mget.r R3, self_v->core.AilObj.fields, "__srv_pid__", null
+    bz.r R3, 1f
+    call core.to_i64 (R3) -> (I0)
+    bz I0, 1f
+.try hs_e1
+    kill I0
+.endtry
+    jmp 1f
+hs_e1:
+    catch R9
+1:  mget.r R4, self_v->core.AilObj.fields, "__tasks_pid__", null
+    bz.r R4, 2f
+    call core.to_i64 (R4) -> (I1)
+    bz I1, 2f
+.try hs_e2
+    kill I1
+.endtry
+    jmp 2f
+hs_e2:
+    catch R9
+2:  ret null
+.endf
+
+; ---- A2A HTTP Client: A2A.connect(url_or_binding, timeout_ms: ...) ----
+
+.func a2a_rpc_post(ref url, i64 timeout_ms, ref method, ref params) -> ref
+    mnew R4
+    mset R4, "jsonrpc", "2.0"
+    mset R4, "id", 1
+    mset R4, "method", method
+    mset R4, "params", params
+    ncall "json.stringify" (R4, 0) -> (R5)
+
+    mnew R6
+    mset R6, "Content-Type", "application/json"
+    strcat R7, url, "/"
+    call http.request ("POST", R7, R6, R5, timeout_ms) -> (R8)
+    mget I1, R8, "status", 0
+    mget.r R9, R8, "body", ""
+    blt I1, 200, rpc_http_err
+    bge I1, 300, rpc_http_err
+.try rpc_json_err
+    ncall "json.parse" (R9) -> (R10)
+.endtry
+    mhas I2, R10, "error"
+    bz I2, rpc_ok
+    mget.r R11, R10, "error", null
+    bz.r R11, rpc_ok
+    mget.r R12, R11, "message", "A2A JSON-RPC error"
+    call core.mk_exc ("A2AError", R12) -> (R13)
+    throw R13
+rpc_ok:
+    mget.r R14, R10, "result", null
+    ret R14
+rpc_http_err:
+    tostr R11, I1
+    strcat R12, "A2A HTTP error ", R11, " from ", url, ": ", R9
+    call core.mk_exc ("A2AError", R12) -> (R13)
+    throw R13
+rpc_json_err:
+    catch R11
+    strcat R12, "A2A invalid JSON response from ", url
+    call core.mk_exc ("A2AError", R12) -> (R13)
+    throw R13
+.endf
+
+.func client_url(ref self_v, ref args, ref block) -> ref
+    mget.r R3, self_v->core.AilObj.fields, "url", ""
+    ret R3
+.endf
+
+.func client_card(ref self_v, ref args, ref block) -> ref
+    mget.r R3, self_v->core.AilObj.fields, "url", ""
+    mget.r R4, self_v->core.AilObj.fields, "timeout_ms", null
+    call core.to_i64 (R4) -> (I0)
+    strcat R5, R3, "/.well-known/agent.json"
+    call http.get (R5, I0) -> (R6)
+    mget I1, R6, "status", 0
+    mget.r R7, R6, "body", ""
+    blt I1, 200, card_err
+    bge I1, 300, card_err
+    ncall "json.parse" (R7) -> (R8)
+    call core.wrap_json (R8) -> (R9)
+    ret R9
+card_err:
+    tostr R8, I1
+    strcat R9, "A2A Agent Card HTTP error ", R8, " from ", R5
+    call core.mk_exc ("A2AError", R9) -> (R10)
+    throw R10
+.endf
+
+.func build_send_params(ref args) -> ref
+    mov R1, ""
+    len I0, args
+    bz I0, 1f
+    call core.to_str (args[0]) -> (R1)
+1:  mnew R2
+    mnew R3
+    mset R3, "role", "user"
+    lnew R4
+    mnew R5
+    mset R5, "type", "text"
+    mset R5, "text", R1
+    lpush R4, R5
+    mset R3, "parts", R4
+    mset R2, "message", R3
+    blt I0, 2, 2f
+    mov R6, args[1]
+    bz.r R6, 2f
+    typeof I1, R6
+    bne I1, 6, 2f
+    mhas I2, R6, "id"
+    bz I2, 2f
+    mget.r R7, R6, "id", null
+    bz.r R7, 2f
+    call core.to_str (R7) -> (R8)
+    mset R2, "id", R8
+2:  ret R2
+.endf
+
+.func client_send_task(ref self_v, ref args, ref block) -> ref
+    mget.r R3, self_v->core.AilObj.fields, "url", ""
+    mget.r R4, self_v->core.AilObj.fields, "timeout_ms", null
+    call core.to_i64 (R4) -> (I0)
+    call build_send_params (args) -> (R5)
+    call a2a_rpc_post (R3, I0, "message/send", R5) -> (R6)
+    call core.wrap_json (R6) -> (R7)
+    ret R7
+.endf
+
+.func client_send(ref self_v, ref args, ref block) -> ref
+    mget.r R3, self_v->core.AilObj.fields, "url", ""
+    mget.r R4, self_v->core.AilObj.fields, "timeout_ms", null
+    call core.to_i64 (R4) -> (I0)
+    call build_send_params (args) -> (R5)
+    call a2a_rpc_post (R3, I0, "message/send", R5) -> (R6)
+    bz.r R6, ret_empty
+    mget.r R7, R6, "status", null
+    bz.r R7, ret_empty
+    mget.r R8, R7, "state", "completed"
+    mget.r R9, R7, "message", null
+    mov R10, ""
+    bz.r R9, chk_state
+    mget.r R11, R9, "parts", null
+    bz.r R11, chk_state
+    len I1, R11
+    bz I1, chk_state
+    mov R12, R11[0]
+    mget.r R10, R12, "text", ""
+chk_state:
+    strcmp I2, R8, "failed"
+    bnz I2, ret_txt
+    call core.mk_exc ("A2AError", R10) -> (R13)
+    throw R13
+ret_txt:
+    ret R10
+ret_empty:
+    ret ""
+.endf
+
+.func client_get_task(ref self_v, ref args, ref block) -> ref
+    mget.r R3, self_v->core.AilObj.fields, "url", ""
+    mget.r R4, self_v->core.AilObj.fields, "timeout_ms", null
+    call core.to_i64 (R4) -> (I0)
+    call core.to_str (args[0]) -> (R5)
+    mnew R6
+    mset R6, "id", R5
+    call a2a_rpc_post (R3, I0, "tasks/get", R6) -> (R7)
+    call core.wrap_json (R7) -> (R8)
+    ret R8
+.endf
+
+.func client_cancel(ref self_v, ref args, ref block) -> ref
+    mget.r R3, self_v->core.AilObj.fields, "url", ""
+    mget.r R4, self_v->core.AilObj.fields, "timeout_ms", null
+    call core.to_i64 (R4) -> (I0)
+    call core.to_str (args[0]) -> (R5)
+    mnew R6
+    mset R6, "id", R5
+    call a2a_rpc_post (R3, I0, "tasks/cancel", R6) -> (R7)
+    call core.wrap_json (R7) -> (R8)
+    ret R8
+.endf
+
+.func init_classes
+    bnz @a2a_inited, 9f
+    call core.mk_class ("A2AClient", null) -> (R0)
+    closure client_url () -> (R1)
+    call core.class_def_method (R0, "url", R1)
+    closure client_card () -> (R1)
+    call core.class_def_method (R0, "card", R1)
+    closure client_send () -> (R1)
+    call core.class_def_method (R0, "send", R1)
+    closure client_send_task () -> (R1)
+    call core.class_def_method (R0, "send_task", R1)
+    closure client_get_task () -> (R1)
+    call core.class_def_method (R0, "get_task", R1)
+    closure client_cancel () -> (R1)
+    call core.class_def_method (R0, "cancel", R1)
+    mov @a2a_client_cls, R0
+
+    call core.mk_class ("A2AHandle", null) -> (R2)
+    closure handle_url () -> (R1)
+    call core.class_def_method (R2, "url", R1)
+    closure handle_port () -> (R1)
+    call core.class_def_method (R2, "port", R1)
+    closure handle_name () -> (R1)
+    call core.class_def_method (R2, "name", R1)
+    closure handle_stop () -> (R1)
+    call core.class_def_method (R2, "stop", R1)
+    mov @a2a_handle_cls, R2
+    mov @a2a_inited, 1
+9:  ret
+.endf
+
+; connect_obj(args_list) -> A2AClient AilObj
+.func connect_obj(ref args) -> ref
+    call init_classes ()
+    mov R1, args[0]
+    mov R2, ""
+    mov I0, 120000                    ; default timeout_ms
+    ; If AilResource ($a2a[:name]) or AilSym (:name), resolve from env a2a.<name>
+    bisa R1, core.AilResource, from_cfg
+    bisa R1, core.AilSym, from_cfg
+    call core.to_str (R1) -> (R2)
+    jmp chk_opts
+from_cfg:
+    call core.to_str (R1) -> (R3)
+    call cfg.require_binding ("a2a", R3) -> (R4)
+    mget.r R2, R4, "url", ""
+    mhas I1, R4, "timeout_ms"
+    bz I1, chk_opts
+    mget I0, R4, "timeout_ms", 120000
+chk_opts:
+    len I2, args
+    blt I2, 2, strip_slash
+    mov R5, args[1]
+    bz.r R5, strip_slash
+    typeof I3, R5
+    bne I3, 6, strip_slash
+    mhas I4, R5, "timeout_ms"
+    bz I4, strip_slash
+    mget.r R6, R5, "timeout_ms", null
+    call core.to_i64 (R6) -> (I0)
+strip_slash:
+    ncall "text.ends_with" (R2, "/") -> (I5)
+    bz I5, mk_client
+    len I6, R2
+    sub I6, I6, 1
+    substr R2, R2, 0, I6
+mk_client:
+    mov R7, @a2a_client_cls
+    call core.mk_obj (R7) -> (R8)
+    mset R8->core.AilObj.fields, "url", R2
+    call core.mk_int (I0) -> (R9)
+    mset R8->core.AilObj.fields, "timeout_ms", R9
+    ret R8
+.endf
+
+; start_obj(args_list) -> A2AHandle AilObj
+; A2A.start(name, handler, host: "127.0.0.1", port: 0, version: "1.0.0", description: "...")
+.func start_obj(ref args) -> ref
+    call init_classes ()
+    call core.to_str (args[0]) -> (R1) ; name
+    mov R2, args[1]                    ; handler
+    mov R3, "127.0.0.1"                ; host
+    mov I0, 0                          ; port (0 = ephemeral free port)
+    mov R4, "1.0.0"                    ; version
+    mov R5, ""                         ; description
+    len I1, args
+    blt I1, 3, do_start
+    mov R6, args[2]
+    bz.r R6, do_start
+    typeof I2, R6
+    bne I2, 6, do_start
+    mhas I3, R6, "host"
+    bz I3, 1f
+    mget.r R7, R6, "host", null
+    call core.to_str (R7) -> (R3)
+1:  mhas I3, R6, "port"
+    bz I3, 2f
+    mget.r R7, R6, "port", null
+    call core.to_i64 (R7) -> (I0)
+2:  mhas I3, R6, "version"
+    bz I3, 3f
+    mget.r R7, R6, "version", null
+    call core.to_str (R7) -> (R4)
+3:  mhas I3, R6, "description"
+    bz I3, do_start
+    mget.r R7, R6, "description", null
+    call core.to_str (R7) -> (R5)
+
+do_start:
+    spawn task_store_loop () -> (I4)
+    new R8, A2aServer
+    mov R8->A2aServer.name, R1
+    mov R8->A2aServer.version, R4
+    mov R8->A2aServer.description, R5
+    mov R8->A2aServer.handler, R2
+    mov R8->A2aServer.url, ""
+    mov R8->A2aServer.tasks_pid, I4
+
+    closure a2a_http_handler (R8, "") -> (R9)
+    call http.start (R3, I0, R9) -> (I5, I6)
+    tostr R10, I6
+    strcat R11, "http://", R3, ":", R10
+    mov R8->A2aServer.url, R11
+
+    mov R12, @a2a_handle_cls
+    call core.mk_obj (R12) -> (R13)
+    mset R13->core.AilObj.fields, "name", R1
+    mset R13->core.AilObj.fields, "url", R11
+    call core.mk_int (I6) -> (R14)
+    mset R13->core.AilObj.fields, "port", R14
+    call core.mk_int (I5) -> (R15)
+    mset R13->core.AilObj.fields, "__srv_pid__", R15
+    call core.mk_int (I4) -> (R16)
+    mset R13->core.AilObj.fields, "__tasks_pid__", R16
+    ret R13
 .endf

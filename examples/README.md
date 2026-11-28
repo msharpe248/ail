@@ -17,6 +17,7 @@ All examples are statically checked via `make check-examples`, and all determini
 | [`support_desk/`](support_desk/README.md) | [`support_desk/mock.ail.env`](support_desk/mock.ail.env) | **Worked multi-file application** using `require`, shared schemas, sandboxed tools, guards, RAG `Knowledge`, System 1 `decide`, stateful `flow`, and `agent` |
 | [`chatbot/`](chatbot/README.md) | [`chatbot/mock.ail.env`](chatbot/mock.ail.env) | **Interactive streaming chatbot** loop with `gets`, `Context` windowing, `/history`, `/checkpoint`, `/rewind`, and PII redaction |
 | [`coding_harness/`](coding_harness/README.md) | [`coding_harness/mock.ail.env`](coding_harness/mock.ail.env) | **Coding agent TUI harness** (Claude Code / Antigravity / Codex-style) with VM-sandboxed workspace tools, live tool-call UI hooks, and interactive `[y/N]` approval guard |
+| [`a2a_poker/`](a2a_poker/README.md) | [`a2a_poker/mock.ail.env`](a2a_poker/mock.ail.env) | **3-Agent A2A Texas Hold'em Poker** — 3 live A2A HTTP servers (`A2A.start` + `A2A.connect`), Agent Card discovery, 7-card hand evaluation, and multi-agent betting |
 | [`full_spec_check.ail`](full_spec_check.ail) | *(none)* | Static verification (`./ail check examples/full_spec_check.ail`) exercising every language construct |
 
 ## Live Local Ollama Examples
@@ -31,6 +32,7 @@ These bind logical resource names to a local [Ollama](https://ollama.com) server
 | [`support_desk/main.ail`](support_desk/main.ail) | [`support_desk/ollama.ail.env`](support_desk/ollama.ail.env) | `./ail run examples/support_desk/main.ail --env examples/support_desk/ollama.ail.env` |
 | [`chatbot/main.ail`](chatbot/main.ail) | [`chatbot/ollama.ail.env`](chatbot/ollama.ail.env) | `./ail run examples/chatbot/main.ail --env examples/chatbot/ollama.ail.env` |
 | [`coding_harness/main.ail`](coding_harness/main.ail) | [`coding_harness/ollama.ail.env`](coding_harness/ollama.ail.env) | `./ail run examples/coding_harness/main.ail --env examples/coding_harness/ollama.ail.env` |
+| [`a2a_poker/table.ail`](a2a_poker/table.ail) | [`a2a_poker/ollama.ail.env`](a2a_poker/ollama.ail.env) | `./ail run examples/a2a_poker/table.ail --env examples/a2a_poker/ollama.ail.env` |
 
 Run the Ollama verification target with:
 ```sh

@@ -27,7 +27,7 @@ static Node *find_tool(const Sema *s, const char *name) {
 
 static bool is_valid_binding_kind(const char *k) {
     static const char *valid[] = {
-        "llm", "s1", "embedder", "db", "vector_db", "mcp", "skills"
+        "llm", "s1", "embedder", "db", "vector_db", "mcp", "skills", "a2a"
     };
     for (size_t i = 0; i < sizeof(valid)/sizeof(valid[0]); i++) {
         if (strcmp(k, valid[i]) == 0) return true;

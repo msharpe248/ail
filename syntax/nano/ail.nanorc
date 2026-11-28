@@ -18,13 +18,13 @@ color cyan "\<(config|errors|field|param|returns|capabilities|limits|model|syste
 color yellow "\<(puts|print|eputs|gets|sleep_ms|budget|read_only|read_write|allow|reject|redact|escalate)\>"
 
 # Types, stdlib modules & exceptions
-color green "\<(Int|Float|Decimal|Bool|String|Array|Hash|Range|Regex|Symbol|Duration|Any|Enum|Context|LogView|Knowledge|MCP|Config|File|Files|Path|OS|JSON|Env|Time|Math|Random|RuntimeError|TypeError|NoMethodError|KeyError|SchemaError|PermissionError|BudgetExceeded|GuardViolation|GuardEscalation|ConfigError|LLMError|System1Error|MCPError|ToolError|EmbedderError|VectorError|FlowError)\>"
+color green "\<(Int|Float|Decimal|Bool|String|Array|Hash|Range|Regex|Symbol|Duration|Any|Enum|Context|LogView|Knowledge|MCP|A2A|Config|File|Files|Path|OS|JSON|Env|Time|Math|Random|RuntimeError|TypeError|NoMethodError|KeyError|SchemaError|PermissionError|BudgetExceeded|GuardViolation|GuardEscalation|ConfigError|LLMError|System1Error|MCPError|A2AError|ToolError|EmbedderError|VectorError|FlowError)\>"
 
 # Constants, symbols & instance variables
 color brightyellow "\<(true|false|nil|self)\>"
 color magenta ":[a-zA-Z_][a-zA-Z0-9_]*[?!]?"
 color brightblue "@[a-zA-Z_][a-zA-Z0-9_]*"
-color brightcyan "\$(llm|s1|embedder|db|vector_db|mcp|skills)\>"
+color brightcyan "\$(llm|s1|embedder|db|vector_db|mcp|skills|a2a)\>"
 
 # Numbers, decimals & durations
 color brightred "\<[0-9][0-9_]*(\.[0-9_]+)?(\.(ms|s|m|h)|d)?\>"

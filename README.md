@@ -62,9 +62,10 @@ make
 # Run a live A2A agent HTTP server (Agent Card + JSON-RPC 2.0 + graceful SIGTERM)
 ./ail run examples/a2a_support.ail --env examples/flow_rag.ail.env -- --http 127.0.0.1:9000
 
-# Run live interactive chatbot & coding agent TUI harness against local Ollama
+# Run live interactive chatbot, coding agent TUI harness & 3-agent A2A Poker against Ollama
 ./ail run examples/chatbot/main.ail --env examples/chatbot/ollama.ail.env
 ./ail run examples/coding_harness/main.ail --env examples/coding_harness/ollama.ail.env
+./ail run examples/a2a_poker/table.ail --env examples/a2a_poker/ollama.ail.env
 
 # Run live streaming & multi-file Support Desk against local Ollama
 ./ail run examples/stream_ollama.ail --env examples/ollama_v03.ail.env
@@ -103,7 +104,7 @@ ail version                               Print version
 | [`examples/`](examples/README.md) | Runnable single-file & multi-file examples ([`support_desk/`](examples/support_desk/README.md)), plus mock and Ollama `.ail.env` configs |
 | [`docs/`](docs/README.md) | Programming Guide, Standard Library Reference, Examples Index, and Language Spec |
 | [`syntax/`](syntax/README.md) | Editor syntax highlighting for Vim/Neovim, VS Code/Cursor, Emacs, Nano, and `bat` |
-| [`tests/`](tests/README.md) | End-to-end deterministic test suite (31 tests) and negative compile-time fixtures |
+| [`tests/`](tests/README.md) | End-to-end deterministic test suite (34 tests) and negative compile-time fixtures |
 
 ---
 

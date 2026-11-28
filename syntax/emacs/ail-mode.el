@@ -56,11 +56,11 @@
    (cons (regexp-opt
           '("Int" "Float" "Decimal" "Bool" "String" "Array" "Hash" "Range" "Regex"
             "Symbol" "Duration" "Any" "Enum"
-            "Context" "LogView" "Knowledge" "MCP" "Config"
+            "Context" "LogView" "Knowledge" "MCP" "A2A" "Config"
             "File" "Files" "Path" "OS" "JSON" "Env" "Time" "Math" "Random"
             "RuntimeError" "TypeError" "NoMethodError" "KeyError" "SchemaError"
             "PermissionError" "BudgetExceeded" "GuardViolation" "GuardEscalation"
-            "ConfigError" "LLMError" "System1Error" "MCPError" "ToolError"
+            "ConfigError" "LLMError" "System1Error" "MCPError" "A2AError" "ToolError"
             "EmbedderError" "VectorError" "FlowError")
           'words)
          'font-lock-type-face)
@@ -70,7 +70,7 @@
      1 font-lock-type-face)
    ;; Symbols, keyword labels, ivars, typed resource registries, flow arrow
    '("@[a-zA-Z_][a-zA-Z0-9_]*" . font-lock-variable-name-face)
-   '("\\$\\(?:llm\\|s1\\|embedder\\|db\\|vector_db\\|mcp\\|skills\\)\\>" . font-lock-builtin-face)
+   '("\\$\\(?:llm\\|s1\\|embedder\\|db\\|vector_db\\|mcp\\|skills\\|a2a\\)\\>" . font-lock-builtin-face)
    '("\\(?:^\\|[^:a-zA-Z0-9_]\\)\\(:[a-zA-Z_][a-zA-Z0-9_]*[?!]?\\)" 1 font-lock-constant-face)
    '("\\<[a-zA-Z_][a-zA-Z0-9_]*[?!]?:" . font-lock-constant-face)
    '("-->" . font-lock-keyword-face))

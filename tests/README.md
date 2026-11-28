@@ -5,7 +5,7 @@
 From the repository root:
 
 ```sh
-# 31 deterministic end-to-end tests (no external APIs or network required)
+# 34 deterministic end-to-end tests (no external APIs or network required)
 make test
 
 # Live end-to-end tests against a local Ollama server (http://127.0.0.1:11434)

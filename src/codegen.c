@@ -643,6 +643,21 @@ static void emit_expr(Codegen *cg, Node *n) {
                 break;
             }
 
+            /* A2A.connect(url_or_binding) / A2A.start(name, handler, ...) */
+            if (n->u.call.recv && n->u.call.recv->kind == ND_IDENT &&
+                strcmp(n->u.call.recv->u.ident.name, "A2A") == 0) {
+                if (strcmp(n->u.call.name, "connect") == 0) {
+                    emit_call_args_list(cg, &n->u.call.args, &n->u.call.kwargs);
+                    sb_append(cg->cur, "    call a2amod.connect_obj (R3) -> (R3)\n");
+                    break;
+                }
+                if (strcmp(n->u.call.name, "start") == 0) {
+                    emit_call_args_list(cg, &n->u.call.args, &n->u.call.kwargs);
+                    sb_append(cg->cur, "    call a2amod.start_obj (R3) -> (R3)\n");
+                    break;
+                }
+            }
+
             /* Stdlib module calls (File.read, Files.glob, JSON.parse, Config.get) */
             char modfn[128];
             if (is_stdlib_module_call(n, modfn, sizeof(modfn))) {

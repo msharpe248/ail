@@ -29,7 +29,7 @@ test-ollama: ail
 	MLWSVM="$(MLWSVM)" ./ail run examples/stream_ollama.ail --env examples/ollama_v03.ail.env
 
 check-examples: ail
-	@for f in examples/*.ail examples/support_desk/main.ail examples/chatbot/main.ail examples/coding_harness/main.ail; do \
+	@for f in examples/*.ail examples/support_desk/main.ail examples/chatbot/main.ail examples/coding_harness/main.ail examples/a2a_poker/table.ail; do \
 		echo "CHECK $$f"; \
 		./ail check "$$f" || exit 1; \
 	done

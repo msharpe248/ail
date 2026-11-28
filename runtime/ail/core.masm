@@ -3327,7 +3327,9 @@ il_d:
     bz I0, mrr_ok
     strcmp I0, kind, "skills"
     bz I0, mrr_ok
-    strcat R2, "unknown resource registry '$", kind, "' (expected $llm, $s1, $embedder, $db, $vector_db, $mcp, or $skills)"
+    strcmp I0, kind, "a2a"
+    bz I0, mrr_ok
+    strcat R2, "unknown resource registry '$", kind, "' (expected $llm, $s1, $embedder, $db, $vector_db, $mcp, $skills, or $a2a)"
     call mk_exc ("ConfigError", R2) -> (R3)
     throw R3
 mrr_ok:

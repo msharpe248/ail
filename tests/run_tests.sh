@@ -56,6 +56,9 @@ pass "check examples/chatbot/main.ail"
 $AIL check examples/coding_harness/main.ail >/dev/null || fail "check coding_harness/main.ail"
 pass "check examples/coding_harness/main.ail"
 
+$AIL check examples/a2a_poker/table.ail >/dev/null || fail "check a2a_poker/table.ail"
+pass "check examples/a2a_poker/table.ail"
+
 if $AIL check tests/bad_unbounded_cycle.ail >/dev/null 2>&1; then
     fail "bad_unbounded_cycle.ail should have been rejected"
 else
@@ -312,6 +315,16 @@ echo "$HARN_OUT" | grep -q 'updated build/harness_demo.txt to v0.5' || fail "har
 grep -q 'AIL harness demo v0.5' build/harness_demo.txt || fail "harness_demo.txt content mismatch"
 rm -f build/harness_demo.txt
 pass "examples/coding_harness/ end-to-end sandboxed read/write/edit + live tool hooks"
+
+echo "=== 14. 3-Agent A2A Poker Table (examples/a2a_poker/) ==="
+POKER_OUT=$(AIL_POKER_SEED=42 $AIL run examples/a2a_poker/table.ail --env examples/a2a_poker/mock.ail.env -- 2)
+echo "$POKER_OUT" | grep -q 'vega-the-shark @ http://127.0.0.1:' || fail "poker A2A card Vega ($POKER_OUT)"
+echo "$POKER_OUT" | grep -q 'lucky-lou @ http://127.0.0.1:' || fail "poker A2A card Lou ($POKER_OUT)"
+echo "$POKER_OUT" | grep -q 'prof-bayes @ http://127.0.0.1:' || fail "poker A2A card Bayes ($POKER_OUT)"
+echo "$POKER_OUT" | grep -q 'Lucky Lou wins 540 chips with Pair of Aces!' || fail "poker hand 1 showdown ($POKER_OUT)"
+echo "$POKER_OUT" | grep -q 'Vega wins 540 chips with Two Pair (Jacks & Threes)!' || fail "poker hand 2 showdown ($POKER_OUT)"
+echo "$POKER_OUT" | grep -q '680 chips' || fail "poker standings ($POKER_OUT)"
+pass "examples/a2a_poker/ 3 live A2A HTTP servers, Agent Card discovery & Texas Hold'em showdown"
 
 echo ""
 echo "All $PASS tests passed!"
