@@ -126,7 +126,16 @@ def ask_player_a2a(seat, idx, street, board, pot, current_bet, seats, history, h
     Choose your action now as JSON.
   MSG
 
-  raw = seat["client"].send(prompt, id: "hand-#{hand_num}-#{street}-#{seat["id"]}")
+  # Send the turn over HTTP JSON-RPC 2.0 (`message/send`) to this player's A2A server.
+  # If the remote agent errors or times out, fall back safely to check/fold so the game continues.
+  raw = begin
+    seat["client"].send(prompt, id: "hand-#{hand_num}-#{street}-#{seat["id"]}")
+  rescue A2AError => e
+    eputs "   \e[31m[A2A error from #{seat["label"]}: #{e.message}]\e[0m"
+    fallback_act = to_call == 0 ? "check" : "fold"
+    return { action: fallback_act, amount: 0, quip: "(disconnected)" }
+  end
+
   parsed = extract_json_obj(raw)
   action = "call"
   amount = 20
@@ -147,7 +156,8 @@ def ask_player_a2a(seat, idx, street, board, pot, current_bet, seats, history, h
     action = to_call == 0 ? "check" : "call"
   end
 
-  { action: action, amount: amount, quip: quip }
+  # Return the normalized player decision hash
+  return { action: action, amount: amount, quip: quip }
 end
 
 # Run one betting street (capped at 1 raise per street for snappy, realistic play)
@@ -249,9 +259,25 @@ def setup_seat(id, label, desc, agent_obj, res_ref, handles)
     handles.push(h)
     url = h.url
   end
-  cl = A2A.connect(url)
-  card = cl.card
-  {
+
+  # Connect over HTTP and fetch the agent's Agent Card (GET /.well-known/agent.json)
+  cl = nil
+  card = nil
+  begin
+    cl = A2A.connect(url)
+    card = cl.fetch_card()
+  rescue A2AError => e
+    eputs "\e[31mFailed to connect to A2A player '#{label}' at #{url}: #{e.message}\e[0m"
+    handles.each { |h| h.stop }
+    OS.exit(1)
+  rescue ConfigError => e
+    eputs "\e[31mInvalid A2A config for '#{label}': #{e.message}\e[0m"
+    handles.each { |h| h.stop }
+    OS.exit(1)
+  end
+
+  # Return the initialized seat state hash
+  return {
     id: id,
     label: label,
     url: url,

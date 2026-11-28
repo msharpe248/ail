@@ -496,7 +496,9 @@ hs_e2:
     mnew R6
     mset R6, "Content-Type", "application/json"
     strcat R7, url, "/"
+.try rpc_net_err
     call http.request ("POST", R7, R6, R5, timeout_ms) -> (R8)
+.endtry
     mget I1, R8, "status", 0
     mget.r R9, R8, "body", ""
     blt I1, 200, rpc_http_err
@@ -514,6 +516,12 @@ hs_e2:
 rpc_ok:
     mget.r R14, R10, "result", null
     ret R14
+rpc_net_err:
+    catch R11
+    call core.exc_message (R11) -> (R12)
+    strcat R13, "A2A connection error to ", url, ": ", R12
+    call core.mk_exc ("A2AError", R13) -> (R14)
+    throw R14
 rpc_http_err:
     tostr R11, I1
     strcat R12, "A2A HTTP error ", R11, " from ", url, ": ", R9
@@ -536,14 +544,29 @@ rpc_json_err:
     mget.r R4, self_v->core.AilObj.fields, "timeout_ms", null
     call core.to_i64 (R4) -> (I0)
     strcat R5, R3, "/.well-known/agent.json"
+.try card_net_err
     call http.get (R5, I0) -> (R6)
+.endtry
     mget I1, R6, "status", 0
     mget.r R7, R6, "body", ""
     blt I1, 200, card_err
     bge I1, 300, card_err
+.try card_json_err
     ncall "json.parse" (R7) -> (R8)
+.endtry
     call core.wrap_json (R8) -> (R9)
     ret R9
+card_net_err:
+    catch R8
+    call core.exc_message (R8) -> (R9)
+    strcat R10, "A2A failed to fetch Agent Card from ", R5, ": ", R9
+    call core.mk_exc ("A2AError", R10) -> (R11)
+    throw R11
+card_json_err:
+    catch R8
+    strcat R9, "A2A invalid Agent Card JSON from ", R5
+    call core.mk_exc ("A2AError", R9) -> (R10)
+    throw R10
 card_err:
     tostr R8, I1
     strcat R9, "A2A Agent Card HTTP error ", R8, " from ", R5
@@ -651,6 +674,7 @@ ret_empty:
     call core.class_def_method (R0, "url", R1)
     closure client_card () -> (R1)
     call core.class_def_method (R0, "card", R1)
+    call core.class_def_method (R0, "fetch_card", R1)
     closure client_send () -> (R1)
     call core.class_def_method (R0, "send", R1)
     closure client_send_task () -> (R1)

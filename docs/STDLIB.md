@@ -203,8 +203,8 @@ Exact arbitrary-precision base-10 decimal backed by MLWSVM `.dec`.
 ### `A2A` Client & Embedded Server
 * `srv = A2A.start(name, handler, host: "127.0.0.1", port: 0, version: "1.0.0", description: "...")` — starts a non-blocking A2A HTTP server in a background MLWSVM process (`port: 0` picks a free ephemeral port). Returns handle with `.url`, `.port`, `.name`, `.stop`.
 * `cl = A2A.connect(url_or_binding, timeout_ms: 120000)` — connects to an A2A agent URL or `$a2a[:name]` binding.
-* `cl.card` → fetches `GET /.well-known/agent.json` Agent Card as a `Hash`.
-* `cl.send(text, id: ...)` → sends JSON-RPC 2.0 `message/send` and returns the agent's reply `String` (raises `A2AError` on HTTP/RPC/task failure).
+* `cl.fetch_card()` (alias `cl.card`) → performs `GET /.well-known/agent.json` and returns the parsed Agent Card `Hash` (raises `A2AError` on connection, HTTP, or JSON failure).
+* `cl.send(text, id: ...)` → sends JSON-RPC 2.0 `message/send` and returns the agent's reply `String` (raises `A2AError` on connection, HTTP, RPC, or task failure).
 * `cl.send_task(text, id: ...)`, `cl.get_task(id)`, `cl.cancel(id)` → return full A2A Task `Hash`.
 
 ---
